@@ -11,6 +11,16 @@ import pytest
 
 from aar_gateway import cli
 
+# the real functions: conftest replaces them with no-ops for every other test
+_INSTALL, _REMOVE, _INSTALLED = cli._mod_install, cli._mod_remove, cli._mod_installed
+
+
+@pytest.fixture(autouse=True)
+def real_plugin_functions(monkeypatch):
+    monkeypatch.setattr(cli, "_mod_install", _INSTALL)
+    monkeypatch.setattr(cli, "_mod_remove", _REMOVE)
+    monkeypatch.setattr(cli, "_mod_installed", _INSTALLED)
+
 ROOT = Path(__file__).resolve().parents[2]
 MOD = ROOT / "mods" / "aar-gateway"
 
