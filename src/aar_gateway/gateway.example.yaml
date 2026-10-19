@@ -1,0 +1,109 @@
+# Gateway config. Copy to `configs/gateway.yaml` (gitignored is wise -- it is
+# per-machine) and point AAR_GATEWAY_CONFIG at it. No API keys live in this
+# file: entries name an environment variable to read their key from, and a
+# missing one fails at startup, not on the first request. See docs/gateway.md.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# interceptor: where Claude Code's requests can go.
+#
+# Claude Code (ANTHROPIC_BASE_URL=http://127.0.0.1:8787, or `aar-gateway code`)
+# sends every request through the gateway. At each new human message the
+# router picks one of `models` below for that turn; the turn's tool loop stays
+# on it. Claude models go to Anthropic on the user's own login (subscription
+# or API key); `openai` models go to that provider with full tool translation.
+# ---------------------------------------------------------------------------
+interceptor:
+  # the "if you always used the strongest model" baseline on the dashboard:
+  # the newest Opus, not the priciest (Opus 5 costs more than Opus 5.5)
+  strongest: claude-opus-5-5
+
+  # Claude Code subagents (Agent tool spawns) get a model by kind, set at
+  # spawn time by the PreToolUse hook `aar-gateway code` installs (and at the
+  # gateway for any it missed): lookup / Explore -> Haiku 5.5; make / Plan ->
+  # Sonnet 5.5; judge keeps the session's model. Never above the session's
+  # model. See docs/gateway.md, "Subagents".
+  subagents:
+    enabled: true
+    roles: {}                     # e.g. {make: claude-opus-5-5, lookup: claude-sonnet-5-5}
+
+  router:
+    enabled: true
+    # The router file `aar-gateway setup` installed: a trained network (the
+    # default, bundled with the package) or a kNN index over a pool's training
+    # prompts. It needs no training data and no PyTorch.
+    artifact: ~/.aar-gateway/router.npz
+    # Cost preference: how much predicted quality a turn may give up for a
+    # cheaper model. Presets (calibrated on LLMRouterBench's held-out split):
+    # best_quality 0.01, balanced 0.05, save_more 0.08. Users change it live
+    # from the dashboard (saved in ~/.aar-gateway/preferences.json), or per
+    # Claude Code session: ANTHROPIC_CUSTOM_HEADERS="x-aar-quality-margin: 0.08"
+    margin: 0.05
+    expected_output_tokens: 800   # output-length prior for cost estimates
+    cache_ttl: 1h                 # Claude Code writes 1-hour cache entries
+    # A switch to another model rewrites the ~200k-token prompt cache once;
+    # it must pay for itself over this many following requests (one turn's
+    # tool loop is often 5-20 requests). Lower = stickier, higher = switches more.
+    horizon_requests: 20
+    # Extra predicted-quality gap needed to move a conversation off the model
+    # it is on. The router's per-prompt scores are noisy; without this a
+    # session flip-flops and pays a cache rewrite on every flip.
+    switch_margin: 0.05
+    # Each turn's predicted quality is blended with the previous turn's: the
+    # weight on the new message (1.0 = judge each message alone). A
+    # conversation's difficulty changes slowly and one prediction is noisy;
+    # without this, consecutive messages flipped Opus -> Haiku -> Opus and Opus
+    # reread the whole conversation into its cache.
+    turn_smoothing: 0.5
+    # Once this many of your turns are graded (aar-gateway-grade), a prompt
+    # with enough similar graded ones is routed on those grades -- the real
+    # tiers, no stand-ins. Otherwise the benchmark router above decides.
+    use_graded: true
+    min_graded_prompts: 20
+
+  # Each model the router may choose. A request is never moved to a model
+  # pricier than the one the user picked. `proxy` is the pool model whose
+  # predicted quality stands in for this one. No public dataset scores today's
+  # Claude tiers on shared prompts, so: Opus -> gpt-5 (the pool's strongest),
+  # Sonnet -> claude-sonnet-4 (same family, one generation back), Haiku ->
+  # gemini-2.5-flash (the pool's fast tier).
+  # Claude prices default to Anthropic's API rates (router/gateway/pricing.py).
+  # `rejects` lists request settings the model answers with a 400, so the
+  # router never picks it for such a request (Opus/Sonnet 5.5 refuse
+  # thinking-disabled; Haiku 4.5 refuses `effort`, which Claude Code sends, so
+  # for Claude Code the fast tier is Haiku 5.5).
+  models:
+    claude-opus-5-5:   {lane: anthropic, proxy: gpt-5, context_window: 1000000, rejects: [thinking_disabled]}
+    claude-opus-5:     {lane: anthropic, proxy: gpt-5, context_window: 1000000}
+    claude-sonnet-5-5: {lane: anthropic, proxy: claude-sonnet-4, context_window: 1000000, rejects: [thinking_disabled]}
+    claude-sonnet-5:   {lane: anthropic, proxy: claude-sonnet-4, context_window: 1000000}
+    claude-haiku-5-5:  {lane: anthropic, proxy: gemini-2.5-flash, context_window: 1000000}
+    claude-haiku-4-5:  {lane: anthropic, proxy: gemini-2.5-flash, context_window: 200000, rejects: [effort]}
+
+    # Any OpenAI-compatible endpoint: OpenAI, Gemini, OpenRouter, Groq, vLLM,
+    # Ollama ... Requests are translated with their tools; a request that
+    # can't be translated losslessly (too many tools, server tools, documents,
+    # images inside tool results) never goes here.
+    # Opt-in: a local model through Ollama. The router never picks it (no
+    # proxy); it is only reachable by pinning it or by `--model`. Uncomment
+    # if you run Ollama and want that option.
+    # llama3.1:latest:                # local, via Ollama -- free
+    #   lane: openai
+    #   base_url: http://127.0.0.1:11434/v1
+    #   proxy: null                   # nothing in the pool is an 8B local model: name it
+    #                                 #   explicitly (--model) rather than let the router guess
+    #   context_window: 32768         # what the model supports; Ollama serves a smaller
+    #   max_tools: 64                 #   window unless OLLAMA_CONTEXT_LENGTH is raised
+    #   prices: {input: 0, output: 0}
+    # qwen2.5-coder:14b answers tool calls as plain JSON text under Ollama (checked
+    # 2026-10-06), so the agent never sees a tool call -- prefer llama3.1 for tools.
+    # gpt-5-mini:
+    #   lane: openai
+    #   base_url: https://api.openai.com/v1
+    #   api_key_env: OPENAI_API_KEY
+    #   max_tokens_param: max_completion_tokens
+    #   proxy: gpt-5-chat
+    #   context_window: 400000
+    #   max_tools: 128
+    #   prices: {input: null, output: null}   # $/MTok -- fill in from the provider's price page

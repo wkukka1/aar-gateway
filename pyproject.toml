@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aar-gateway"
+version = "0.1.0"
+description = "Local gateway that routes Claude Code's requests to the cheapest model that can handle them"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",              # upstream client
+    "fastembed",          # the router's text encoder (ONNX, no PyTorch)
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+aar-gateway = "aar_gateway.cli:main"
+aar-gateway-grade = "aar_gateway.grading.grade:main"
+aar-gateway-subagents = "aar_gateway.grading.subagent_baseline:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aar_gateway = ["static/*.html", "routers/*.npz", "gateway.example.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
