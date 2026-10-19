@@ -714,7 +714,16 @@ class _Turn:
         if self.agent:
             asked = (_cc_sessions.get(self.claude_session) or {}).get("requested") or self.requested
         prev_tokens = self.session.get("prompt_tokens") or 0
-        baseline = _warm_usage(usage, max(prev_tokens, self.shared_before))
+        if canonical_model(self.target) == canonical_model(asked):
+            # served on the model asked for: what happened is the baseline, unless this
+            # request switched back after a reroute (the reroute cost that model its
+            # cache). Other conversations' prefixes don't count: a cache they warmed
+            # that this request still had to write was never shared.
+            previous = self.session.get("model")
+            warm = prev_tokens if previous and canonical_model(previous) != canonical_model(asked) else 0
+        else:
+            warm = max(prev_tokens, self.shared_before)
+        baseline = _warm_usage(usage, warm)
         self._remember_served(status, usage, lane)
         cost = cost_usd(price_for(_settings, self.target), usage)
         cost_asked = cost_usd(price_for(_settings, asked), baseline)

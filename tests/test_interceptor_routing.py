@@ -551,3 +551,37 @@ def test_thread_models_survive_a_restart(env):
     interceptor._message_models_loaded = False
     assert interceptor._message_model("msg_kept") == "claude-haiku-4-5"
 
+
+
+def test_a_request_on_the_asked_model_is_its_own_baseline(env):
+    """Seen live as +1251%: a new session on Opus, not rerouted, had to write
+    its cache; the baseline borrowed another conversation's cached prefix and
+    priced the same request as if read. Nothing was rerouted, so nothing changed."""
+    client, settings, _, state = env
+    interceptor.configure(settings, lambda body, ctx: None)
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 20000}
+    client.post("/v1/messages", json=turn("first project"), headers=AUTH)
+    other = {**turn("another project"), "metadata": {"user_id": "user_x_account_y_session_other"}}
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 23000,
+                      "cache_read_input_tokens": 0}
+    client.post("/v1/messages", json=other, headers=AUTH)
+    rec = records()[-1]
+    assert rec["routed_model"] == rec["requested_model"]
+    assert rec["cost_if_requested_usd"] == pytest.approx(rec["cost_usd"])
+
+
+def test_switching_back_still_counts_the_cache_the_reroute_cost(env):
+    """Turn 2 went to Haiku; turn 3 returns to Opus and rewrites its cache.
+    Without the router Opus would have kept it, so that rewrite is the router's."""
+    client, settings, _, state = env
+    interceptor.configure(settings, lambda body, ctx: None)
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 1000}
+    client.post("/v1/messages", json=turn("first"), headers=AUTH)
+    interceptor.set_model_picker(lambda body, ctx: "claude-haiku-4-5")
+    client.post("/v1/messages", json=turn("second"), headers=AUTH)
+    interceptor.set_model_picker(lambda body, ctx: None)
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 1300}
+    client.post("/v1/messages", json=turn("third"), headers=AUTH)
+    rec = records()[-1]
+    assert rec["routed_model"] == "claude-opus-5"
+    assert rec["cost_if_requested_usd"] < rec["cost_usd"]  # the warm baseline: the reroute cost this
