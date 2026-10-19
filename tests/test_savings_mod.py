@@ -121,3 +121,14 @@ def test_disable_removes_the_plugin(monkeypatch, claude, tmp_path):
     monkeypatch.setattr(cli, "_service", lambda action, run=None: 0)
     cli._mod_remove()
     assert ["plugin", "marketplace", "remove", "aar-gateway"] in claude.calls
+
+
+def test_the_mod_counts_cache_use_per_turn():
+    """mods/aar-gateway/test/check.mjs drives the hooks with fake requests."""
+    import shutil as sh
+
+    if sh.which("node") is None:
+        pytest.skip("node isn't installed")
+    done = subprocess.run(["node", str(MOD / "test" / "check.mjs")], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert "self-check passed" in done.stdout
