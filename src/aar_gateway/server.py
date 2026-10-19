@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import interceptor, listen, share
@@ -180,6 +181,25 @@ async def _json_object(request: Request) -> dict:
     if not isinstance(body, dict):
         raise HTTPException(400, "send a JSON object")
     return body
+
+
+@app.get("/api/session-requests")
+def session_requests(session_id: str = "", limit: int = 40):  # plain def: reads the log off the event loop
+    """One session's recent requests, for the Claude Code mod's pane."""
+    return interceptor.session_requests(session_id, limit)
+
+
+@app.post("/api/route")
+async def route(request: Request):
+    """Which model the router picks for a prompt, for the Claude Code mod
+    that switches models itself (``{"model": null}``: keep the one asked for)."""
+    body = await _json_object(request)
+    try:
+        est = int(body.get("est_prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        est = 0
+    return await run_in_threadpool(interceptor.route_text, str(body.get("text") or ""),
+                                   str(body.get("model") or ""), str(body.get("session_id") or ""), est)
 
 
 @app.post("/api/subagent-spawn")

@@ -585,3 +585,41 @@ def test_switching_back_still_counts_the_cache_the_reroute_cost(env):
     rec = records()[-1]
     assert rec["routed_model"] == "claude-opus-5"
     assert rec["cost_if_requested_usd"] < rec["cost_usd"]  # the warm baseline: the reroute cost this
+
+
+def test_the_route_endpoint_answers_for_the_mod_and_the_proxy_keeps_its_choice(env):
+    """The mod asks which model, switches the turn itself; the proxy then keeps
+    that model (no second routing) and still counts against the model asked for."""
+    client, settings, calls, _ = env
+    interceptor.configure(settings, lambda body, ctx: {"model": "claude-haiku-4-5", "reason": "cheapest"})
+    sid = "s-mod-0123456789"
+    picked = client.post("/api/route", json={"text": "rename this variable", "model": "claude-opus-5",
+                                            "session_id": sid}).json()
+    assert picked["model"] == "claude-haiku-4-5" and picked["requested"] == "claude-opus-5"
+    interceptor.set_model_picker(lambda body, ctx: pytest.fail("the proxy routed a turn the mod had routed"))
+    body = {**turn("rename this variable", model="claude-haiku-4-5"),
+            "metadata": {"user_id": f"user_x_account_y_session_{sid}"}}
+    client.post("/v1/messages", json=body, headers=AUTH)
+    assert calls["anthropic"][-1]["model"] == "claude-haiku-4-5"
+    rec = records()[-1]
+    assert rec["reason"] == "routed in Claude Code (mod)"
+    assert rec["requested_model"] == "claude-opus-5" and rec["routed_model"] == "claude-haiku-4-5"
+
+
+def test_the_route_endpoint_keeps_the_model_when_routing_is_off_or_fails(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, lambda body, ctx: 1 / 0)
+    assert client.post("/api/route", json={"text": "hi", "model": "claude-opus-5"}).json()["model"] is None
+    assert client.post("/api/route", json=["not", "an", "object"]).status_code == 400
+
+
+def test_session_requests_lists_one_sessions_requests_without_text(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    sid = "s-pane-0123456789"
+    client.post("/v1/messages", json={**turn("secret words"), "metadata": {"user_id": f"user_x_account_y_session_{sid}"}},
+                headers=AUTH)
+    client.post("/v1/messages", json=turn("someone else's"), headers=AUTH)
+    data = client.get("/api/session-requests", params={"session_id": sid}).json()
+    assert data["requests"] == 1 and data["recent"][0]["requested_model"] == "claude-opus-5"
+    assert "secret" not in json.dumps(data)

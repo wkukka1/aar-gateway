@@ -4,6 +4,7 @@ removes it only when asked, and never fails setup when Claude Code can't."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -32,13 +33,13 @@ def test_the_marketplace_and_plugin_files_are_valid():
     assert entry["name"] == "aar-gateway" and entry["source"] == "./mods/aar-gateway"
     assert (MOD / entry["source"].removeprefix("./mods/aar-gateway") / ".claude-plugin" / "plugin.json").exists()
     assert json.loads((MOD / ".claude-plugin" / "plugin.json").read_text())["name"] == "aar-gateway"
-    assert json.loads((MOD / "hooks" / "hooks.json").read_text())["modules"] == ["./register.js"]
+    assert json.loads((MOD / "hooks" / "hooks.json").read_text())["modules"] == ["./register.tsx"]
 
 
-def test_the_mod_only_reads_the_gateway():
-    code = (MOD / "hooks" / "register.js").read_text()
-    assert "POST" not in code and "/api/preferences" not in code and "/v1/messages" not in code
-    assert "http://127.0.0.1:8787/stats" in code  # the read-only stats endpoint, and nothing else
+def test_the_mod_only_talks_to_the_local_gateway_and_never_changes_settings():
+    code = (MOD / "hooks" / "register.tsx").read_text()
+    assert re.findall(r"https?://[^'\"`\s]+", code) == ["http://127.0.0.1:8787"]
+    assert "/api/preferences" not in code and "/v1/messages" not in code and "/api/shutdown" not in code
 
 
 class _Claude:
@@ -123,12 +124,11 @@ def test_disable_removes_the_plugin(monkeypatch, claude, tmp_path):
     assert ["plugin", "marketplace", "remove", "aar-gateway"] in claude.calls
 
 
-def test_the_mod_counts_cache_use_per_turn():
-    """mods/aar-gateway/test/check.mjs drives the hooks with fake requests."""
+def test_the_mods_own_tests_pass():
+    """mods/aar-gateway/tests run under Claude Code's test kit (needs `claude`)."""
     import shutil as sh
 
-    if sh.which("node") is None:
-        pytest.skip("node isn't installed")
-    done = subprocess.run(["node", str(MOD / "test" / "check.mjs")], capture_output=True, text=True, timeout=60)
-    assert done.returncode == 0, done.stderr
-    assert "self-check passed" in done.stdout
+    if sh.which("claude") is None:
+        pytest.skip("Claude Code isn't installed")
+    done = subprocess.run(["claude", "plugin", "test", str(MOD)], capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]

@@ -885,6 +885,13 @@ async def _decide(turn: _Turn) -> None:
         if by_role:
             turn.target, turn.decision = by_role["model"], by_role
             return
+    mod_route = _mod_route_for(turn) if turn.agent is None and turn.human is not None else None
+    if mod_route:
+        # the mod switched this turn's model inside Claude Code: keep it, and count
+        # savings against the model Claude Code asked for before the switch
+        turn.target, turn.requested = turn.requested, mod_route["asked"]
+        turn.decision = {"reason": "routed in Claude Code (mod)"}
+        return
     if turn.agent is None and turn.human is not None:
         if is_correction(turn.human) and turn.session.get("model") not in (None, turn.requested):
             turn.correction, turn.hold_left = True, CORRECTION_HOLD_TURNS
@@ -1025,7 +1032,7 @@ async def _via_anthropic_unguarded(turn: _Turn) -> Response:
         _remember_block(turn, upstream.status_code, detail)
         turn.error = f"{turn.target}: {error_summary(detail.encode())}"  # kept if the fallback succeeds
         turn.fall_back(upstream.status_code, detail)
-        upstream = await _send_anthropic(turn.request, "v1/messages", turn.raw)
+        upstream = await _send_anthropic(turn.request, "v1/messages", turn.body_for(turn.requested))
         if upstream.status_code == 400 and thread_previous(turn.body):
             upstream = await _find_thread_model(turn, upstream, tried={turn.attempted, turn.requested})
     elif upstream.status_code == 400 and thread_previous(turn.body):
@@ -1349,6 +1356,68 @@ def summarize_subagents(records: list[dict]) -> list[dict]:
     """One row per subagent role: spawns, the models that answered, plan usage against the
     session's own model, and how much of the prompt was read from cache."""
     return summarize(records)["subagents"]
+
+
+#: what the Claude Code mod chose for a session's turn (``/api/route``): the
+#: proxy keeps that model instead of routing the request again, and counts the
+#: saving against the model Claude Code asked for. Keyed by session id.
+_mod_routes: dict[str, dict] = {}
+MOD_ROUTE_SECONDS = 120.0
+
+
+def route_text(text: str, requested: str, session_id: str = "", est_prompt_tokens: int = 0) -> dict:
+    """The model the router picks for a prompt, for a caller that switches the
+    model itself (the Claude Code mod). Never raises: ``{"model": None,
+    "reason": ...}`` means keep the model asked for."""
+    routing = _settings.get("routing") or {}
+    keep = {"model": None, "requested": requested}
+    if routing.get("mode") == "off":
+        return {**keep, "reason": "routing off (dashboard)"}
+    if routing.get("mode") == "pin":
+        pick = {"model": routing["pinned_model"], "reason": "pinned (dashboard)"}
+    elif _picker is None or not text.strip():
+        return {**keep, "reason": "no router loaded" if _picker is None else "no prompt text"}
+    else:
+        body = {"model": requested, "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+                "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}]}
+        ctx = {"requested": requested, "human_text": text, "est_prompt_tokens": est_prompt_tokens,
+               "last_model": None, "prev_quality": None, "last_prompt_tokens": None, "quality_margin": None,
+               "allow_upgrade": bool(routing.get("allow_upgrade")), "usage_profile": dict(_global_profile) or None,
+               "warm_tokens": {}, "blocked": {}}
+        try:
+            picked = _picker(body, ctx)
+        except Exception as exc:  # noqa: BLE001 -- a router failure keeps the asked model
+            return {**keep, "reason": f"router error: {type(exc).__name__}"}
+        if isinstance(picked, str):
+            picked = {"model": picked, "reason": "picker"}
+        pick = {"model": (picked or {}).get("model"), "reason": (picked or {}).get("reason") or "router",
+                "predicted_quality": (picked or {}).get("predicted_quality")}
+    if pick["model"] and session_id:
+        _mod_routes[session_id[:12]] = {"asked": requested, "model": pick["model"], "at": time.monotonic()}
+    return {**pick, "requested": requested}
+
+
+def _mod_route_for(turn: _Turn) -> dict | None:
+    """The mod's choice for this request's session, if it named this model just now."""
+    route = _mod_routes.get((turn.claude_session or "")[:12])
+    if route and route["model"] == turn.requested and time.monotonic() - route["at"] < MOD_ROUTE_SECONDS:
+        return route
+    return None
+
+
+def session_requests(session_id: str, limit: int = 40) -> dict:
+    """One Claude Code session's recent requests for the mod's pane: models,
+    why, cache use and cost against the model asked for. No prompt text."""
+    key = (session_id or "")[:12]
+    mine = [r for r in read_records() if key and r.get("claude_session") == key]
+    fields = ("ts", "requested_model", "routed_model", "reason", "status", "subagent", "agent_role",
+              "cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens", "output_tokens",
+              "cost_usd", "cost_if_requested_usd", "correction", "thread")
+    priced = [r for r in mine if r.get("cost_usd") is not None and r.get("cost_if_requested_usd")]
+    cost, base = sum(r["cost_usd"] for r in priced), sum(r["cost_if_requested_usd"] for r in priced)
+    return {"session": key, "requests": len(mine),
+            "saved_pct": round(100 * (1 - cost / base), 1) if base else None,
+            "recent": [{k: r.get(k) for k in fields} for r in mine[-max(1, min(limit, 200)):]]}
 
 
 def session_summary(session_id: str) -> dict:
