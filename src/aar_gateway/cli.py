@@ -1310,8 +1310,19 @@ def _statusline() -> None:
 # --------------------------------------------------------------------------- #
 # entry point                                                                 #
 # --------------------------------------------------------------------------- #
+def _printable_output() -> None:
+    """Output with marks (✓ ✗ ●) must not crash a console or pipe on a legacy code page
+    (cp1252 on Windows): unencodable characters print as ``?`` instead."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):  # a replaced stream (tests, pagers) keeps its own rules
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    _printable_output()
     url = _base_url()
     # Claude Code's own calls, and `code` (whose arguments belong to `claude`):
     # handled before argparse, with no heavy imports

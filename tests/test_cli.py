@@ -423,3 +423,14 @@ def test_the_login_service_only_counts_for_the_port_it_serves(tmp_path, monkeypa
     assert not cli._service_serves_this_port(unit)
     unit.write_text("<key>AAR_GATEWAY_PORT</key>\n<string>58802</string>\n")
     assert cli._service_serves_this_port(unit)
+
+
+def test_output_with_marks_survives_a_legacy_code_page(monkeypatch):
+    import io
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(cli.sys, "stdout", out)
+    cli._printable_output()
+    print("✓ router")  # the doctor's mark: not in cp1252
+    out.flush()
+    assert out.buffer.getvalue().startswith(b"? router")
