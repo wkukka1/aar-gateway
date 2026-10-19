@@ -522,7 +522,8 @@ def _fetch_router(source: str, target: Path) -> dict:
     return header
 
 
-def _setup(router: str | None, force: bool, enable: bool | None = False, share: bool | None = False) -> int:
+def _setup(router: str | None, force: bool, enable: bool | None = False, share: bool | None = False,
+           mod: bool | None = None) -> int:
     """Everything a new user needs: the router file and a config that uses it."""
     home = _home()
     home.mkdir(parents=True, exist_ok=True)
@@ -571,6 +572,11 @@ def _setup(router: str | None, force: bool, enable: bool | None = False, share: 
         share = input(SHARE_QUESTION).strip().lower() in ("y", "yes")  # opt in: only a yes
     if share is not None:
         _share(["on" if share else "off"])
+    if mod is None and sys.stdin.isatty() and not _mod_installed():
+        print()
+        mod = input(MOD_QUESTION).strip().lower() in ("y", "yes")  # opt in: only a yes
+    if mod:
+        _mod_install()
     print()
     return _doctor()
 
@@ -1104,6 +1110,75 @@ def _enable_settings(path: Path, url: str, force: bool) -> None:
     _write_claude_settings(path, settings)
 
 
+MOD_QUESTION = ("Show your gateway savings inside Claude Code too? This adds a Claude Code plugin that reads the "
+                "local gateway's numbers (read-only) and shows them on the status line. [y/N] ")
+MOD_MARKETPLACE = "wkukka1/agentic-llm-router"
+MOD_PLUGIN = "aar-gateway@aar-gateway"
+MOD_MIN_VERSION = (2, 1, 287)  # Claude Code mods (plugins that run code inside a session)
+
+
+def _claude_version() -> tuple[int, ...] | None:
+    claude = shutil.which("claude")
+    if claude is None:
+        return None
+    try:
+        out = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=20).stdout
+        return tuple(int(x) for x in out.split()[0].split("."))
+    except (OSError, IndexError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _mod_installed() -> bool:
+    claude = shutil.which("claude")
+    if claude is None:
+        return False
+    try:
+        out = subprocess.run([claude, "plugin", "list"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "aar-gateway@aar-gateway" in out
+
+
+def _mod_install() -> bool:
+    """Add the Claude Code plugin for the savings line. Never fails setup: says
+    what happened and what to do instead."""
+    version = _claude_version()
+    if version is None:
+        print("savings in Claude Code: `claude` isn't installed, so the plugin was skipped "
+              "(run `aar-gateway setup` again after installing Claude Code)")
+        return False
+    if version < MOD_MIN_VERSION:
+        print(f"savings in Claude Code: needs Claude Code {'.'.join(map(str, MOD_MIN_VERSION))} or later "
+              f"(you have {'.'.join(map(str, version))}); update Claude Code, then run `aar-gateway setup --mod`")
+        return False
+    claude = shutil.which("claude")
+    steps = [[claude, "plugin", "marketplace", "add", MOD_MARKETPLACE],
+             [claude, "plugin", "install", MOD_PLUGIN, "--scope", "user"]]
+    for cmd in steps:
+        try:
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=180, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"savings in Claude Code: skipped ({type(exc).__name__}); try again later")
+            return False
+        if done.returncode != 0 and "already" not in (done.stdout + done.stderr).lower():
+            print(f"savings in Claude Code: not installed ({(done.stderr or done.stdout).strip()[:160]})")
+            return False
+    print("savings in Claude Code: installed. Open a new session; the savings show on the status line, "
+          "and `/aar-savings` shows them on demand. `aar-gateway disable` removes it.")
+    return True
+
+
+def _mod_remove() -> None:
+    claude = shutil.which("claude")
+    if claude is None:
+        return
+    try:  # removing the marketplace also uninstalls its plugin
+        subprocess.run([claude, "plugin", "marketplace", "remove", "aar-gateway"],
+                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _disable() -> int:
     """Takes out what :func:`_enable` added; the rest of the settings stay."""
     path = _claude_settings_path()
@@ -1111,6 +1186,7 @@ def _disable() -> int:
         _disable_settings(path)
     if sys.platform == "darwin" or sys.platform.startswith("linux"):
         _service("uninstall")
+    _mod_remove()
     print("plain `claude` talks to Anthropic directly again; `aar-gateway code` still uses the gateway")
     return 0
 
@@ -1443,6 +1519,10 @@ def main(argv: list[str] | None = None) -> int:
     sharing = setup.add_mutually_exclusive_group()
     sharing.add_argument("--share", action="store_true", help="opt in to anonymous usage sharing without asking")
     sharing.add_argument("--no-share", action="store_true", help="don't share usage data, and don't ask")
+    savings_mod = setup.add_mutually_exclusive_group()
+    savings_mod.add_argument("--mod", action="store_true",
+                             help="add the savings line to Claude Code (a Claude Code plugin) without asking")
+    savings_mod.add_argument("--no-mod", action="store_true", help="don't add the Claude Code plugin, and don't ask")
     enable = sub.add_parser("enable", help="every `claude` session goes through the gateway, no command needed")
     enable.add_argument("--force", action="store_true", help="replace another ANTHROPIC_BASE_URL in your settings")
     sub.add_parser("disable", help="undo `enable`: plain `claude` talks to Anthropic directly again")
@@ -1497,7 +1577,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "setup":
         return _setup(args.router, args.force, enable=True if args.yes else False if args.no_enable else None,
-                      share=True if args.share else False if args.no_share else None)
+                      share=True if args.share else False if args.no_share else None,
+                      mod=True if args.mod else False if args.no_mod else None)
     if args.command == "enable":
         return _enable(force=args.force)
     if args.command == "disable":
