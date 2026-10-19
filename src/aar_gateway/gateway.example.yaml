@@ -1,5 +1,5 @@
-# Gateway config. Copy to `configs/gateway.yaml` (gitignored is wise -- it is
-# per-machine) and point AAR_GATEWAY_CONFIG at it. No API keys live in this
+# Gateway config. `aar-gateway setup` writes ~/.aar-gateway/config.yaml; or copy
+# this file anywhere (it is per-machine) and point AAR_GATEWAY_CONFIG at it. No API keys live in this
 # file: entries name an environment variable to read their key from, and a
 # missing one fails at startup, not on the first request. See docs/gateway.md.
 
@@ -68,7 +68,7 @@ interceptor:
   # Claude tiers on shared prompts, so: Opus -> gpt-5 (the pool's strongest),
   # Sonnet -> claude-sonnet-4 (same family, one generation back), Haiku ->
   # gemini-2.5-flash (the pool's fast tier).
-  # Claude prices default to Anthropic's API rates (router/gateway/pricing.py).
+  # Claude prices default to Anthropic's API rates (aar_gateway/pricing.py).
   # `rejects` lists request settings the model answers with a 400, so the
   # router never picks it for such a request (Opus/Sonnet 5.5 refuse
   # thinking-disabled; Haiku 4.5 refuses `effort`, which Claude Code sends, so

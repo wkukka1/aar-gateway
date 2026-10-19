@@ -11,6 +11,7 @@ gateway process.
     aar-gateway history [on|off|show|export|delete]   the messages kept on this computer
     aar-gateway config                  which config is in use
     aar-gateway dashboard               open the dashboard
+    aar-gateway view [--host H] [--port N]   a read-only dashboard for your phone (Tailscale)
     aar-gateway service install|uninstall|status   start at login (launchd / systemd)
     aar-gateway serve                   the gateway in the foreground
     aar-gateway agents [--install DIR]  the subagent kinds as --agents JSON / agent files

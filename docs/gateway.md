@@ -85,9 +85,10 @@ config, `router.artifact` takes precedence over `data_config`.
 | `aar-gateway setup [--router FILE\|URL] [--force]` | install the router file and write a config (existing configs are kept without `--force`) |
 | `aar-gateway service install` / `uninstall` / `status` | start at login: a LaunchAgent on macOS, a systemd user unit on Linux; restarted if it crashes, not after `stop` |
 | `aar-gateway serve` | the gateway in the foreground |
+| `aar-gateway view [--host ADDRESS] [--port N]` | a read-only copy of the dashboard on another address (your Tailscale IPv4 by default, port 8788), for checking from a phone |
 
-`status --json` prints the same as JSON. The command line is
-[`router/gateway/cli.py`](../src/router/gateway/cli.py); `hook` and
+`status --json` and `doctor --json` print the same as JSON, as does `share status --json`. The command line is
+[`aar_gateway/cli.py`](../src/aar_gateway/cli.py); `hook` and
 `statusline`, which Claude Code calls itself, import only the standard
 library (the subagent hook runs in about 0.07 s).
 
@@ -128,7 +129,7 @@ trained run from `data/processed/nirt_runs/` (or set `interceptor.router.runs_di
 
 ```bash
 curl -s localhost:8787/health          # router on? graded prompts + calibration offsets
-aar-gateway code -p "Read src/router/gateway/graded.py and explain min_prompts in two sentences."
+aar-gateway code -p "Read aar-gateway/src/aar_gateway/graded.py and explain min_prompts in two sentences."
 tail -3 ~/.aar-gateway/requests.jsonl  # requested vs routed model, why, cost vs no-router
 aar-gateway history show 1             # the turn was kept in the on-device history
 aar-gateway-grade --n 2                # grade pending turns on the real tiers
@@ -141,7 +142,7 @@ names the model you picked.
 
 ## How one request flows
 
-[`router/gateway/interceptor.py`](../src/router/gateway/interceptor.py):
+[`aar_gateway/interceptor.py`](../src/aar_gateway/interceptor.py):
 
 1. **Is this a new turn?** A request whose last user message carries new
    human text starts a turn. Claude Code's `<system-reminder>` text, and the
@@ -169,7 +170,7 @@ to its log.
 
 ## How the router decides
 
-[`router/gateway/routing.py`](../src/router/gateway/routing.py) composes the
+[`aar_gateway/routing.py`](../src/aar_gateway/routing.py) composes the
 existing pieces: a trained `RouterModel` scores the prompt, and
 `MarginRoutingPolicy` takes **the cheapest candidate within the user's
 quality margin of the best**.
@@ -290,7 +291,7 @@ would have had cached. Never headers, credentials or prompt text.
 **Plan usage, not dollars.** On a subscription nothing is billed per token.
 Scaling by API price gives the relative cost of the same work on each model,
 the best available proxy for how much of the plan it used. Prices are in
-[`router/gateway/pricing.py`](../src/router/gateway/pricing.py).
+[`aar_gateway/pricing.py`](../src/aar_gateway/pricing.py).
 
 ### Advanced settings
 
@@ -323,7 +324,7 @@ stand-in in the benchmark); pin it, or pass `--model`.
 
 A model with `lane: openai` is any OpenAI-compatible endpoint: OpenAI,
 Gemini's compatible endpoint, OpenRouter, Groq, vLLM, Ollama.
-[`router/gateway/translate.py`](../src/router/gateway/translate.py) converts the
+[`aar_gateway/translate.py`](../src/aar_gateway/translate.py) converts the
 Anthropic request and converts the answer back, so the agent's tool loop runs
 unchanged. It carries tools, tool calls, tool results, images,
 mid-conversation system messages and streaming.
@@ -582,7 +583,7 @@ Known limits:
 Claude Code's subagents (Agent tool spawns) each run in a fresh context and
 return only their final message to the main agent, so the work that fills a
 context window can run on a cheaper model without the main conversation
-paying for it. [`subagents.py`](../src/router/gateway/subagents.py) gives
+paying for it. [`subagents.py`](../src/aar_gateway/subagents.py) gives
 each one a tier.
 
 **Where the model is set: at spawn time.** Before Claude Code runs any tool
@@ -662,7 +663,7 @@ task, tagged with its kind.
 
 ## Configuration
 
-Everything is in `configs/gateway.example.yaml`, commented. Environment
+Everything is in [`gateway.example.yaml`](../src/aar_gateway/gateway.example.yaml), commented. Environment
 variables:
 
 * `AAR_GATEWAY_CONFIG`: path to the config.

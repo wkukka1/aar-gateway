@@ -16,7 +16,7 @@ plus messages mined from Claude Code's own history into ``turns.jsonl``):
    complete response to the request.
 3. **Append** one row per (turn, model) to ``~/.aar-gateway/graded.jsonl``:
    prompt, model, score in [0, 1], the judge's reason, plan usage. The gateway
-   reads this file (:mod:`router.gateway.graded`) and, once there is enough
+   reads this file (:mod:`aar_gateway.graded`) and, once there is enough
    of it, routes on these scores instead of the benchmark stand-ins.
 
 Every replay and judge call uses the user's plan: ``--n`` bounds it, and a
