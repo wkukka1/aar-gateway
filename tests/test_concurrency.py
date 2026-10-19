@@ -19,7 +19,7 @@ import pytest
 from aar_gateway import cli
 from aar_gateway.config import atomic_write_text
 
-SRC = str(Path(cli.__file__).resolve().parents[2])
+SRC = str(Path(cli.__file__).resolve().parents[1])  # the src/ folder that holds aar_gateway
 
 
 def _env(tmp_path: Path, settings: Path, port: int, **extra) -> dict:

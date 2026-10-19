@@ -17,7 +17,7 @@ import pytest
 
 from aar_gateway import cli
 
-SRC = str(Path(cli.__file__).resolve().parents[2])
+SRC = str(Path(cli.__file__).resolve().parents[1])  # the src/ folder that holds aar_gateway
 
 
 def _port() -> int:

@@ -9,7 +9,7 @@ from pathlib import Path
 from aar_gateway import interceptor
 from aar_gateway.config import load_settings
 
-SRC = str(Path(__file__).resolve().parents[3] / "src")
+SRC = str(Path(__file__).resolve().parents[1] / "src")  # aar-gateway/src
 
 
 def test_importing_the_interceptor_survives_a_broken_local_models_file(tmp_path):
