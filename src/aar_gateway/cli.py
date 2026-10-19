@@ -1,8 +1,9 @@
 """``aar-gateway``: run Claude Code through the gateway, and manage the
 gateway process.
 
-    aar-gateway code [claude args...]   Claude Code through the gateway (starts it if needed)
-    aar-gateway start | stop | restart  the gateway in the background
+    aar-gateway start                   the gateway on: every Claude Code session goes through it
+    aar-gateway stop                    the gateway off: Claude Code talks to Anthropic directly
+    aar-gateway restart                 stop, then start the gateway
     aar-gateway status                  running? router loaded? where are its files?
     aar-gateway logs [-n N] [-f]        the gateway's own log
     aar-gateway setup [--router FILE|URL]   first-time setup: the router + a config
@@ -186,7 +187,7 @@ def _ensure_running(url: str, *, quiet: bool = False, timeout: float = 90) -> bo
 
 
 def _start_or_alert(url: str) -> bool:
-    """Start the gateway for ``aar-gateway code``. When it can't be started,
+    """Start the gateway for ``aar-gateway start``. When it can't be started,
     say so on stderr and return False: the session then goes straight to
     Anthropic instead of failing. Never raises."""
     try:
@@ -309,7 +310,7 @@ def _status(as_json: bool = False) -> int:
         print(f"● stopped        nothing answers at {url}")
         print(f"  config         {info['config'] or 'none (defaults; router off)'}")
         print(f"  log            {info['log']}")
-        print("  start it with  aar-gateway start   (or aar-gateway code)")
+        print("  start it with  aar-gateway start")
         return 1
     router = info["router"]
     state = ("on" if router["enabled"] else f"FAILED TO LOAD -- {router['error']}" if router["error"]
@@ -472,7 +473,7 @@ def _local(argv: list[str]) -> int:
         _write_local_models(configured)
         print(f"added {name}. The router never picks it on its own; use it by\n"
               f"  - pinning it on the dashboard (Advanced settings -> Pin a model), or\n"
-              f"  - aar-gateway code --model {name}")
+              f"  - claude --model {name}, with the gateway on (`aar-gateway start`)")
     if _healthy(_base_url()):
         _restart()
         print("restarted the gateway")
@@ -548,11 +549,11 @@ def _setup(router: str | None, force: bool, enable: bool | None = False, share: 
         _restart()
     print()
     if auto_enabled():
-        print("plain `claude` already goes through the gateway (`aar-gateway disable` to undo)")
+        print("every `claude` session already goes through the gateway (`aar-gateway stop` to undo)")
     elif enable is None and sys.stdin.isatty():
         # opt in: only a yes changes Claude Code's settings
-        answer = input("Also use the gateway in every Claude Code session, so plain `claude` saves too?\n"
-                       "(otherwise start Claude Code with `aar-gateway code`) [y/N] ")
+        answer = input("Use the gateway in every Claude Code session? (`aar-gateway stop` undoes it)\n"
+                       "[y/N] ")
         enable = answer.strip().lower() in ("y", "yes")
     if enable and not auto_enabled():
         try:
@@ -560,8 +561,7 @@ def _setup(router: str | None, force: bool, enable: bool | None = False, share: 
         except SystemExit as exc:  # another base URL already set: say so, finish setup
             print(exc)
     elif not auto_enabled():
-        print("plain `claude` is unchanged: start Claude Code with `aar-gateway code`\n"
-              "(or run `aar-gateway enable` once to use the gateway in every session)")
+        print("Claude Code is unchanged until you run `aar-gateway start`")
     from . import share as sharing
 
     print()
@@ -662,13 +662,13 @@ def _doctor(as_json: bool = False) -> int:
                "the gateway stopped answering, so sessions talk to Anthropic directly (no routing)",
                "aar-gateway start  -- routing comes back on with the next message")
     elif not auto_enabled():
-        report(None, "every Claude Code session", "off: only `aar-gateway code` uses the gateway",
-               "aar-gateway enable")
+        report(None, "every Claude Code session", "off: Claude Code talks to Anthropic directly",
+               "aar-gateway start")
     elif _healthy(url):
-        report(True, "every Claude Code session", "plain `claude` goes through the gateway")
+        report(True, "every Claude Code session", "every `claude` session goes through the gateway")
     else:
         report(False, "every Claude Code session", "on, but the gateway isn't running, so `claude` can't connect",
-               "aar-gateway start  (or `aar-gateway disable` to talk to Anthropic directly)")
+               "aar-gateway start  (or `aar-gateway stop` to talk to Anthropic directly)")
 
     from . import share as sharing
 
@@ -960,7 +960,7 @@ def _settings_lock(path: Path, *, wait: float = 10.0):
 
 
 def auto_enabled() -> bool:
-    """Whether plain ``claude`` goes through this gateway (``aar-gateway enable``)."""
+    """Whether every ``claude`` session goes through this gateway (``aar-gateway start``)."""
     try:
         settings = _read_claude_settings(_claude_settings_path())
     except SystemExit:
@@ -1045,7 +1045,7 @@ def _enable(force: bool = False) -> int:
     hook that starts the gateway when it isn't running, the subagent hook and
     the status line; the subagent kinds go to ``~/.claude/agents``; on macOS
     and Linux the gateway also starts at login. Only what's missing is added,
-    and ``aar-gateway disable`` takes exactly that out again."""
+    and ``aar-gateway stop`` takes exactly that out again."""
     import tempfile
 
     # the environment's own folder: its `python` is often a link to one elsewhere
@@ -1053,7 +1053,7 @@ def _enable(force: bool = False) -> int:
     if not force and any(here.is_relative_to(Path(t).resolve()) for t in (tempfile.gettempdir(), "/tmp")):
         raise SystemExit(f"this copy of the gateway is in a temporary folder ({sys.prefix}), which the\n"
                          f"system deletes: every `claude` session would then fail to connect. Install it with\n"
-                         f"`uv tool install` and run `aar-gateway enable` from there (or pass --force).")
+                         f"`uv tool install` and run `aar-gateway start` from there (or pass --force).")
     path = _claude_settings_path()
     url = _base_url()
     with _settings_lock(path):
@@ -1067,7 +1067,7 @@ def _enable(force: bool = False) -> int:
             print(f"couldn't register the login service ({exc}); each session starts the gateway instead")
     else:
         _ensure_running(url, quiet=True)
-    print("undo with `aar-gateway disable`")
+    print("undo with `aar-gateway stop`")
     return 0
 
 
@@ -1079,7 +1079,7 @@ def _enable_settings(path: Path, url: str, force: bool) -> None:
     current = env.get("ANTHROPIC_BASE_URL")
     if current and current != url and not force:
         raise SystemExit(f"Claude Code already sends requests to {current} (ANTHROPIC_BASE_URL in {path}).\n"
-                         f"Run `aar-gateway enable --force` to point it at the gateway instead.")
+                         f"Run `aar-gateway start --force` to point it at the gateway instead.")
     env["ANTHROPIC_BASE_URL"] = url
     _suspended_file().unlink(missing_ok=True)  # the next message checks the gateway afresh
     env.setdefault("ENABLE_TOOL_SEARCH", "true")  # see _claude_command
@@ -1111,7 +1111,7 @@ def _disable() -> int:
         _disable_settings(path)
     if sys.platform == "darwin" or sys.platform.startswith("linux"):
         _service("uninstall")
-    print("plain `claude` talks to Anthropic directly again; `aar-gateway code` still uses the gateway")
+    print("every `claude` session talks to Anthropic directly again (`aar-gateway start` turns it back on)")
     return 0
 
 
@@ -1422,11 +1422,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="aar-gateway", description="Route Claude Code through the AAR gateway.")
     sub = parser.add_subparsers(dest="command", metavar="command")
-    sub.add_parser("code", help="run Claude Code through the gateway, starting it if needed "
-                                "(further arguments go to `claude`)")
-    start = sub.add_parser("start", help="start the gateway in the background")
-    start.add_argument("--quiet", action="store_true", help="print nothing (Claude Code's SessionStart hook)")
-    sub.add_parser("stop", help="stop the gateway")
+    start = sub.add_parser("start", help="start the gateway, and send every Claude Code session through it")
+    start.add_argument("--quiet", action="store_true",
+                       help="only start the gateway, print nothing (Claude Code's hook; never touches settings)")
+    start.add_argument("--force", action="store_true", help="replace another ANTHROPIC_BASE_URL in your settings")
+    sub.add_parser("stop", help="stop the gateway, and send Claude Code straight to Anthropic again")
     sub.add_parser("restart", help="stop, then start the gateway")
     status = sub.add_parser("status", help="is it running, is the router loaded, where are its files")
     status.add_argument("--json", action="store_true")
@@ -1439,13 +1439,15 @@ def main(argv: list[str] | None = None) -> int:
     every = setup.add_mutually_exclusive_group()
     every.add_argument("--yes", action="store_true", help="use the gateway in every `claude` session without asking")
     every.add_argument("--no-enable", action="store_true",
-                       help="leave plain `claude` alone (use `aar-gateway code` instead)")
+                       help="leave Claude Code alone until you run `aar-gateway start`")
     sharing = setup.add_mutually_exclusive_group()
     sharing.add_argument("--share", action="store_true", help="opt in to anonymous usage sharing without asking")
     sharing.add_argument("--no-share", action="store_true", help="don't share usage data, and don't ask")
-    enable = sub.add_parser("enable", help="every `claude` session goes through the gateway, no command needed")
+    enable = sub.add_parser("enable")  # the settings part of `start`; kept for scripts, not listed
     enable.add_argument("--force", action="store_true", help="replace another ANTHROPIC_BASE_URL in your settings")
-    sub.add_parser("disable", help="undo `enable`: plain `claude` talks to Anthropic directly again")
+    sub.add_parser("disable")  # the settings part of `stop`; kept for scripts, not listed
+    # argparse has no way to hide a subcommand; drop enable/disable from the listing
+    sub._choices_actions[:] = [a for a in sub._choices_actions if a.dest not in ("enable", "disable")]
     doctor_p = sub.add_parser("doctor", help="check the setup, with a fix for each problem")
     doctor_p.add_argument("--json", action="store_true", help="the checks as JSON (for scripts and the ops agent)")
     sub.add_parser("stats", help="the gateway's totals as JSON (savings, requests, errors)")
@@ -1466,16 +1468,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     if args.command == "start":
-        if args.quiet:
+        if args.quiet:  # the SessionStart hook: the gateway only, settings untouched
             try:
                 _ensure_running(url, quiet=True)
             except SystemExit:
                 pass  # Claude Code's next request reports the gateway being down
             return 0
+        _enable(force=args.force)
         started = _ensure_running(url)
         print(("started" if started else "already running") + f": {url}  (dashboard {url}/dashboard)")
+        print("every `claude` session now goes through the gateway (`aar-gateway stop` undoes that)")
         return 0
     if args.command == "stop":
+        _disable()  # Claude Code first, so no new request reaches the gateway
         _stop()
         return 0
     if args.command == "restart":

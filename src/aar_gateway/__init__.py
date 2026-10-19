@@ -1,6 +1,6 @@
 """Local gateway that runs Claude Code through the router.
 
-Claude Code points at it (``ANTHROPIC_BASE_URL``, or ``aar-gateway code``);
+Claude Code points at it (``ANTHROPIC_BASE_URL``, or ``aar-gateway start``);
 at every new human message the trained router picks the model for that turn
 (:mod:`.routing`), Claude models are forwarded to Anthropic on the user's own
 login and other models get the request translated with its tools

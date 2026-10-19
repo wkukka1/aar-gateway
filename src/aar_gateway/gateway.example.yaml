@@ -8,7 +8,7 @@ version: 1
 # ---------------------------------------------------------------------------
 # interceptor: where Claude Code's requests can go.
 #
-# Claude Code (ANTHROPIC_BASE_URL=http://127.0.0.1:8787, or `aar-gateway code`)
+# Claude Code (ANTHROPIC_BASE_URL=http://127.0.0.1:8787, or `aar-gateway start`)
 # sends every request through the gateway. At each new human message the
 # router picks one of `models` below for that turn; the turn's tool loop stays
 # on it. Claude models go to Anthropic on the user's own login (subscription
@@ -20,7 +20,7 @@ interceptor:
   strongest: claude-opus-5-5
 
   # Claude Code subagents (Agent tool spawns) get a model by kind, set at
-  # spawn time by the PreToolUse hook `aar-gateway code` installs (and at the
+  # spawn time by the PreToolUse hook `aar-gateway start` installs (and at the
   # gateway for any it missed): lookup / Explore -> Haiku 5.5; make / Plan ->
   # Sonnet 5.5; judge keeps the session's model. Never above the session's
   # model. See docs/gateway.md, "Subagents".

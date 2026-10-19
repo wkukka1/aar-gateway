@@ -15,7 +15,8 @@ Claude Code ──► gateway (127.0.0.1:8787) ──► router picks a model fo
 ```bash
 uv tool install git+https://github.com/wkukka1/aar-gateway
 aar-gateway setup        # installs the bundled router file and writes ~/.aar-gateway/config.yaml
-aar-gateway code         # starts the gateway if needed, then runs Claude Code through it
+aar-gateway start        # turns the gateway on: every Claude Code session goes through it
+aar-gateway stop         # turns it off again: Claude Code talks to Anthropic directly
 aar-gateway dashboard    # http://127.0.0.1:8787/dashboard
 aar-gateway doctor       # if anything looks wrong
 ```

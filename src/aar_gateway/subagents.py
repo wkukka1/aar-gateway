@@ -5,7 +5,7 @@ Code runs its ``PreToolUse`` hooks first, with the call's ``subagent_type``
 and ``prompt``; a hook may return the call with ``model`` set, and the
 subagent then runs on that model (verified on Claude Code 2.1.296: the
 subagent ran on Haiku 5.5 while the main agent stayed on Sonnet 5.5).
-``aar-gateway code`` installs that hook (``aar-gateway hook``), which asks
+``aar-gateway start`` installs that hook (``aar-gateway hook``), which asks
 the gateway for :func:`spawn_decision`. This is documented behaviour, so it
 does not break when Claude Code rewords a prompt.
 
@@ -179,7 +179,7 @@ def spawn_decision(subagent_type: str | None, task: str | None, session_model: s
     return {**out, "model": target, "alias": alias, "reason": f"{agent['role']} -> {target}"}
 
 
-#: The kinds ``aar-gateway code`` gives Claude Code (``--agents``). Each
+#: The kinds ``aar-gateway start`` gives Claude Code (``--agents``). Each
 #: prompt ends with an output budget -- a subagent's whole answer lands in the
 #: main agent's context and is re-sent with every request after it -- and
 #: lookup and judge are limited to tools that read and run, not edit.

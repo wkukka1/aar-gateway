@@ -179,6 +179,26 @@ def test_enable_keeps_the_users_settings_and_disable_restores_them(claude_settin
     assert json.loads(claude_settings.read_text()) == mine and not cli.auto_enabled()
 
 
+def test_start_turns_every_session_on_and_stop_turns_it_off(claude_settings, monkeypatch, capsys):
+    import json
+
+    mine = {"model": "opus"}
+    claude_settings.write_text(json.dumps(mine))
+    monkeypatch.setattr(cli, "_ensure_running", lambda url, quiet=False: True)
+    monkeypatch.setattr(cli, "_stop", lambda: True)
+    assert cli.main(["start"]) == 0
+    assert cli.auto_enabled() and "every `claude` session" in capsys.readouterr().out
+    assert cli.main(["stop"]) == 0
+    assert json.loads(claude_settings.read_text()) == mine and not cli.auto_enabled()
+
+
+def test_the_quiet_start_that_the_hook_runs_never_touches_settings(claude_settings, monkeypatch):
+    started = []
+    monkeypatch.setattr(cli, "_ensure_running", lambda url, quiet=False: started.append(url) or True)
+    assert cli.main(["start", "--quiet"]) == 0
+    assert started and not claude_settings.exists()
+
+
 def test_enable_never_replaces_another_proxy_unless_forced(claude_settings):
     import json
 
@@ -204,7 +224,7 @@ def test_setup_changes_claude_code_only_on_a_yes(claude_settings, monkeypatch, c
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "")  # Enter: the default is no
     cli.main(["setup"])
-    assert not cli.auto_enabled() and "aar-gateway code" in capsys.readouterr().out
+    assert not cli.auto_enabled() and "aar-gateway start" in capsys.readouterr().out
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
     cli.main(["setup"])
     assert cli.auto_enabled()

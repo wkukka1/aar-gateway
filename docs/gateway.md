@@ -24,7 +24,8 @@ Claude Code ──► gateway (127.0.0.1:8787) ──► router picks a model fo
 uv tool install git+https://github.com/wkukka1/aar-gateway
 aar-gateway setup          # installs the bundled router file + a config
 
-aar-gateway code          # starts the gateway if needed, then runs Claude Code through it
+aar-gateway start         # turns the gateway on: every Claude Code session goes through it
+aar-gateway stop          # turns it off again: Claude Code talks to Anthropic directly
 aar-gateway dashboard     # opens http://127.0.0.1:8787/dashboard
 aar-gateway doctor        # if anything looks wrong
 ```
@@ -77,7 +78,9 @@ config, `router.artifact` takes precedence over `data_config`.
 
 | Command | What it does |
 |---|---|
-| `aar-gateway start` / `stop` / `restart` | the gateway in the background (`code` and `dashboard` start it if needed) |
+| `aar-gateway start` | starts the gateway and sends every Claude Code session through it. `start --quiet` (the session hook) only starts it |
+| `aar-gateway stop` | sends Claude Code straight to Anthropic again, then stops the gateway |
+| `aar-gateway restart` | stops, then starts the gateway; Claude Code's settings are left as they are |
 | `aar-gateway status` | running or not, router loaded or why not, config, requests and saving, where the logs are |
 | `aar-gateway logs [-n 50] [-f]` | the gateway's own log; `-f` follows it |
 | `aar-gateway doctor` | checks Claude Code, the config, the router, the port and the log folder, with a fix for each problem |
@@ -100,10 +103,8 @@ flags, and liveness is checked over HTTP (`os.kill(pid, 0)` would terminate
 the process there) -- but is untested, and `service` isn't available there:
 use `aar-gateway start`.
 
-`aar-gateway code` passes every further argument to `claude`
-(`aar-gateway code -p "..."`, `aar-gateway code -c`). It is the same as
-running `ENABLE_TOOL_SEARCH=true ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude`
-with the gateway already up (`aar-gateway start`). It also sets Claude Code's
+With `aar-gateway start` on, `claude` itself (`claude -p "..."`, `claude -c`) goes through
+the gateway, so every flag works as usual. `start` also sets Claude Code's
 status line to show **which model actually answered** and this session's
 cost against no router, e.g.
 `aar router · claude-sonnet-5-5 (routed) · $0.21 · saved $0.26 (55%)`.
@@ -129,7 +130,7 @@ trained run from `data/processed/nirt_runs/` (or set `interceptor.router.runs_di
 
 ```bash
 curl -s localhost:8787/health          # router on? graded prompts + calibration offsets
-aar-gateway code -p "Read aar-gateway/src/aar_gateway/graded.py and explain min_prompts in two sentences."
+claude -p "Read aar-gateway/src/aar_gateway/graded.py and explain min_prompts in two sentences."
 tail -3 ~/.aar-gateway/requests.jsonl  # requested vs routed model, why, cost vs no-router
 aar-gateway history show 1             # the turn was kept in the on-device history
 aar-gateway-grade --n 2                # grade pending turns on the real tiers
@@ -257,7 +258,7 @@ Three ways to set it:
 * **For one Claude Code session only**, with a header:
 
 ```bash
-ANTHROPIC_CUSTOM_HEADERS="x-aar-quality-margin: 0.1" aar-gateway code
+ANTHROPIC_CUSTOM_HEADERS="x-aar-quality-margin: 0.1" claude
 ```
 
 ## Dashboard
@@ -342,7 +343,7 @@ use them.
 
 Keys come from the environment variable named in `api_key_env`; a missing one
 fails at startup. A model on this lane needs no Anthropic login: name it as
-the model (`aar-gateway code --model llama3.1:latest`) or let the router pick it.
+the model (`claude --model llama3.1:latest`, with the gateway on) or let the router pick it.
 
 What this means for Claude Code, checked live:
 
@@ -587,7 +588,7 @@ paying for it. [`subagents.py`](../src/aar_gateway/subagents.py) gives
 each one a tier.
 
 **Where the model is set: at spawn time.** Before Claude Code runs any tool
-it runs its `PreToolUse` hooks with the call's input. `aar-gateway code`
+it runs its `PreToolUse` hooks with the call's input. `aar-gateway start`
 installs one for the Agent tool (`aar-gateway hook`). It sends the call's
 `subagent_type` and `prompt` to the gateway (`POST /api/subagent-spawn`) and
 returns the call with `model` set (`haiku`, `sonnet` or `opus`). Claude Code
@@ -598,7 +599,7 @@ subagent ran on Haiku 5.5 while the main agent stayed on Opus 5.5.
   decision, the hook prints nothing and the call goes ahead unchanged.
 * A `model` the main agent set itself is left alone.
 * Routing Off or Pin (dashboard) leaves spawns alone.
-* `AAR_GATEWAY_HOOK=0` stops `aar-gateway code` from installing the hook.
+* `AAR_GATEWAY_HOOK=0` stops `aar-gateway start` from installing the hook.
 
 **At the gateway, a fallback.** A subagent's requests carry
 `cc_is_subagent=true` in their system prompt's billing line (undocumented,
@@ -645,7 +646,7 @@ No match: the general router decides, as for any turn.
 Claude Code's own `model:` field. `aar-gateway agents --install` writes them
 to `~/.claude/agents/` (existing files are kept); `aar-gateway agents` prints
 them as `--agents` JSON. `AAR_GATEWAY_AGENTS=0`, or passing your own
-`--agents`, stops `aar-gateway code` from adding them.
+`--agents`, stops `aar-gateway start` from adding them.
 
 **Config.** `interceptor.subagents.roles` maps a kind to a model (`null`
 keeps the session's); `enabled: false` routes subagents like any turn.

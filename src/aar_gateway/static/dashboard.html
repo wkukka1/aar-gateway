@@ -538,7 +538,7 @@ function renderRecent(turning) {
       <td class="l why hide-md" title="${esc(r.reason)}">${src ? `<span class="pill src">${src}</span>` : ""}${esc(r.reason)}</td>
       <td class="strong">${usd(r.cost_usd)}</td>${requestSavedCell(r)}
       <td class="hide-sm">${statusCell(r.status)}</td></tr>`;
-  }).join("") || `<tr><td colspan="6" class="empty">Nothing yet. Run <code>aar-gateway code</code>.</td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="empty">Nothing yet. Run <code>aar-gateway start</code>.</td></tr>`;
 
   $("page-label").textContent = `Page ${page + 1} of ${pages}`;
   const shown = [...new Set([0, pages - 1, page - 1, page, page + 1])].filter((i) => i >= 0 && i < pages).sort((a, b) => a - b);
@@ -584,7 +584,7 @@ async function refresh() {
         <td class="num">${num(r.turns)}</td><td class="num hide-sm">${num(r.subagent_spawns)}</td>
         ${mixCell(r.models, "hide-md")}<td class="strong">${usd(r.cost_usd)}</td>
         <td class="num hide-sm">${usd(r.cost_if_requested_usd)}</td>${savedCell(r.cost_usd, r.cost_if_requested_usd)}</tr>`;
-    }).join("") || `<tr><td colspan="7" class="empty">No sessions yet. Run <code>aar-gateway code</code>.</td></tr>`);
+    }).join("") || `<tr><td colspan="7" class="empty">No sessions yet. Run <code>aar-gateway start</code>.</td></tr>`);
 
     const models = Object.entries(s.models).sort((a, b) => b[1].cost_usd - a[1].cost_usd);
     const totalCost = models.reduce((a, [, r]) => a + r.cost_usd, 0);
