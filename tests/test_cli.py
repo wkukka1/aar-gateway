@@ -425,6 +425,64 @@ def test_the_login_service_only_counts_for_the_port_it_serves(tmp_path, monkeypa
     assert cli._service_serves_this_port(unit)
 
 
+def test_doctor_json_is_a_list_of_checks(claude_settings, monkeypatch, capsys):
+    import json
+
+    monkeypatch.setattr(cli, "_healthy", lambda url: False)
+    code = cli.main(["doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is (code == 0) and isinstance(data["checks"], list)
+    assert all({"check", "ok", "detail", "fix"} <= set(c) for c in data["checks"])
+
+
+def test_share_status_json(capsys):
+    import json
+
+    cli.main(["share", "status", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["sharing"] is False and "endpoint" in data and "hf_" not in json.dumps(data)
+
+
+class _Exec(Exception):
+    """Stands in for os.execve, which never returns."""
+
+
+def test_code_still_starts_claude_when_the_gateway_cannot_start(monkeypatch, capsys, tmp_path):
+    """No gateway must never mean no Claude Code: it starts straight against
+    Anthropic, and says so."""
+    def cannot_start(url, quiet=False, timeout=90):
+        raise SystemExit("the gateway exited while starting (code 1)")
+    monkeypatch.setattr(cli, "_ensure_running", cannot_start)
+    monkeypatch.setattr(cli, "_claude_settings_path", lambda: tmp_path / "none.json")
+    monkeypatch.setattr(cli.shutil, "which", lambda name, path=None: "/usr/bin/claude")
+    monkeypatch.setattr(cli, "WINDOWS", False)
+    seen = {}
+
+    def execve(path, argv, env):  # the real exec never returns; stop here instead
+        seen.update(env=env, argv=argv)
+        raise _Exec()
+    monkeypatch.setattr(cli.os, "execve", execve)
+    with pytest.raises(_Exec):
+        cli.main(["code"])
+    assert "ANTHROPIC_BASE_URL" not in seen["env"]
+    assert "talks to Anthropic directly" in capsys.readouterr().err
+
+
+def test_code_routes_through_the_gateway_when_it_is_up(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "_ensure_running", lambda url, quiet=False, timeout=90: True)
+    monkeypatch.setattr(cli.shutil, "which", lambda name, path=None: "/usr/bin/claude")
+    monkeypatch.setattr(cli, "WINDOWS", False)
+    seen = {}
+
+    def execve(path, argv, env):
+        seen.update(env=env)
+        raise _Exec()
+    monkeypatch.setattr(cli.os, "execve", execve)
+    with pytest.raises(_Exec):
+        cli.main(["code"])
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == cli._base_url()
+
+
 def test_output_with_marks_survives_a_legacy_code_page(monkeypatch):
     import io
 

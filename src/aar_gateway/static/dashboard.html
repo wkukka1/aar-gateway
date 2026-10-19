@@ -213,7 +213,7 @@
       <div class="bars" id="k-asked-bars"></div>
     </div>
     <div class="card kpi">
-      <span class="eyebrow" id="k-strong-label">Plan usage vs always strongest</span>
+      <span class="eyebrow" id="k-strong-label">Plan usage vs always Opus 5.5</span>
       <span class="big" id="k-strong-pct">–</span>
       <div class="bars" id="k-strong-bars"></div>
     </div>
@@ -569,9 +569,9 @@ async function refresh() {
     const t = s.totals;
     tween($("k-req"), t.requests, (v) => num(Math.round(v)));
     $("k-req-tags").textContent = "now";
-    $("k-strong-label").textContent = `Plan usage vs always ${s.strongest_model ? pretty(s.strongest_model) : "strongest"}`;
     saving($("k-asked-pct"), $("k-asked-bars"), t.cost_usd, t.cost_if_requested_usd, "No router");
-    saving($("k-strong-pct"), $("k-strong-bars"), t.cost_usd, t.cost_if_strongest_usd, "All strongest");
+    $("k-strong-label").textContent = `Plan usage vs always ${s.strongest_model ? pretty(s.strongest_model) : "Opus 5.5"}`;
+    saving($("k-strong-pct"), $("k-strong-bars"), t.cost_usd, t.cost_if_strongest_usd, "Always Opus");
 
     // sessions with no turn of their own (just Claude Code naming the session) are noise here
     const sessions = (s.sessions || []).filter((r) => r.turns > 0 || r.subagent_spawns > 0);

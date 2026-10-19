@@ -550,3 +550,4 @@ def test_thread_models_survive_a_restart(env):
     interceptor._message_models.clear()  # what a restart loses
     interceptor._message_models_loaded = False
     assert interceptor._message_model("msg_kept") == "claude-haiku-4-5"
+
