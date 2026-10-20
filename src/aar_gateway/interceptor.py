@@ -723,6 +723,10 @@ class _Turn:
             warm = prev_tokens if previous and canonical_model(previous) != canonical_model(asked) else 0
         else:
             warm = max(prev_tokens, self.shared_before)
+            if canonical_model(self.target) in _warm_tokens(self.sig):
+                # the routed model held this prefix: what it actually read is how much was
+                # really shared, and the model asked for would have read no more
+                warm = min(warm, usage.get("cache_read_input_tokens") or 0)
         baseline = _warm_usage(usage, warm)
         self._remember_served(status, usage, lane)
         cost = cost_usd(price_for(_settings, self.target), usage)
@@ -853,6 +857,14 @@ def _est_prompt_tokens(turn: _Turn) -> int:
 
 
 async def _decide(turn: _Turn) -> None:
+    mod_route = _mod_route_for(turn) if turn.agent is None else None
+    if mod_route:
+        # the mod switched this turn's model inside Claude Code: keep it on every
+        # request of the turn, and count savings against the model asked for
+        turn.target, turn.requested = turn.requested, mod_route["asked"]
+        turn.decision = {"reason": "routed in Claude Code (mod)" if turn.human is not None
+                         else "same turn as the previous request"}
+        return
     previous = thread_previous(turn.body)
     if previous:
         # the API keeps this conversation server-side and this request only
@@ -885,13 +897,6 @@ async def _decide(turn: _Turn) -> None:
         if by_role:
             turn.target, turn.decision = by_role["model"], by_role
             return
-    mod_route = _mod_route_for(turn) if turn.agent is None and turn.human is not None else None
-    if mod_route:
-        # the mod switched this turn's model inside Claude Code: keep it, and count
-        # savings against the model Claude Code asked for before the switch
-        turn.target, turn.requested = turn.requested, mod_route["asked"]
-        turn.decision = {"reason": "routed in Claude Code (mod)"}
-        return
     if turn.agent is None and turn.human is not None:
         if is_correction(turn.human) and turn.session.get("model") not in (None, turn.requested):
             turn.correction, turn.hold_left = True, CORRECTION_HOLD_TURNS
@@ -1398,9 +1403,12 @@ def route_text(text: str, requested: str, session_id: str = "", est_prompt_token
 
 
 def _mod_route_for(turn: _Turn) -> dict | None:
-    """The mod's choice for this request's session, if it named this model just now."""
+    """The mod's choice for this request's session, if it names this model and is
+    recent: the turn's first request or any later one (each use keeps it fresh,
+    so a long tool loop stays counted against the model asked for)."""
     route = _mod_routes.get((turn.claude_session or "")[:12])
     if route and route["model"] == turn.requested and time.monotonic() - route["at"] < MOD_ROUTE_SECONDS:
+        route["at"] = time.monotonic()
         return route
     return None
 

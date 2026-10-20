@@ -623,3 +623,37 @@ def test_session_requests_lists_one_sessions_requests_without_text(env):
     data = client.get("/api/session-requests", params={"session_id": sid}).json()
     assert data["requests"] == 1 and data["recent"][0]["requested_model"] == "claude-opus-5"
     assert "secret" not in json.dumps(data)
+
+
+def test_every_request_of_a_turn_the_mod_routed_counts_against_the_model_asked_for(env):
+    """Seen live: the tool loop's later requests were counted against the mod's
+    model (no saving shown) instead of the model asked for."""
+    client, settings, calls, state = env
+    interceptor.configure(settings, lambda body, ctx: {"model": "claude-haiku-4-5", "reason": "cheapest"})
+    sid = "s-loop-0123456789"
+    client.post("/api/route", json={"text": "read calc.py", "model": "claude-opus-5", "session_id": sid})
+    meta = {"metadata": {"user_id": f"user_x_account_y_session_{sid}"}}
+    client.post("/v1/messages", json={**turn("read calc.py", model="claude-haiku-4-5"), **meta}, headers=AUTH)
+    loop = turn([{"type": "tool_result", "tool_use_id": "t1", "content": "def add(a, b): ..."}], model="claude-haiku-4-5")
+    client.post("/v1/messages", json={**loop, **meta}, headers=AUTH)
+    first, second = records()[-2:]
+    assert first["reason"] == "routed in Claude Code (mod)"
+    assert second["requested_model"] == "claude-opus-5" and second["routed_model"] == "claude-haiku-4-5"
+    assert second["cost_if_requested_usd"] > second["cost_usd"]
+
+
+def test_a_prefix_the_routed_model_held_but_did_not_read_is_not_credited_to_the_baseline(env):
+    """Seen live: a prefix 'shared' with an earlier request on the routed model
+    still had to be written in full there, yet the baseline priced it as read on
+    the model asked for (0.18 vs 0.012, shown as +1400%)."""
+    client, settings, calls, state = env
+    interceptor.configure(settings, lambda body, ctx: "claude-haiku-4-5")
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 20000}
+    client.post("/v1/messages", json=turn("first session"), headers=AUTH)
+    other = {**turn("second session"), "metadata": {"user_id": "user_x_account_y_session_another"}}
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 20000,
+                      "cache_read_input_tokens": 0}
+    client.post("/v1/messages", json=other, headers=AUTH)
+    rec = records()[-1]
+    assert rec["routed_model"] == "claude-haiku-4-5"
+    assert rec["cost_if_requested_usd"] > rec["cost_usd"]  # Opus writing 20k costs more than Haiku writing it
