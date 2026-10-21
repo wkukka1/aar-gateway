@@ -1406,9 +1406,17 @@ def route_text(text: str, requested: str, session_id: str = "", est_prompt_token
     models that failed earlier in it. Never raises: ``{"model": None, ...}``
     means keep the model asked for."""
     routing = _settings.get("routing") or {}
-    keep = {"model": None, "requested": requested}
     key = f"{session_id[:12]}:main"
-    loop = _mod_loops.get(key) or {}
+    loop = dict(_mod_loops.get(key) or {})
+    if loop.get("asked") and requested == loop.get("model") and requested != loop["asked"]:
+        # a resumed session (claude -c) restarts on the model the mod last switched it to,
+        # which Claude Code recorded: the person asked for the one before.
+        # shortcut: a /model choice of the model already in use reads the same; rare
+        requested = loop["asked"]
+    if session_id:
+        loop["asked"] = requested
+        _lru_set(_mod_loops, key, loop, _MAX_SESSIONS)
+    keep = {"model": None, "requested": requested}
     est = max(est_prompt_tokens, loop.get("prompt_tokens") or 0)
     failed = {str(m): "failed earlier in this session" for m in (blocked or [])}
     body = {"model": requested, "tools": [{"name": "Read", "input_schema": {"type": "object"}}],

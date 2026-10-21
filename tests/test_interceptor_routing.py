@@ -767,3 +767,17 @@ def test_the_mod_route_keeps_the_proxys_rules(env):
     settings["models"]["claude-haiku-4-5"]["context_window"] = 1000
     pinned = route("anything")
     assert pinned["model"] is None and "can't take this request" in pinned["reason"]
+
+
+def test_a_resumed_session_is_routed_against_the_model_first_asked_for(env):
+    """Seen live: after `claude -c` the session came back on the model the mod
+    had switched to (Sonnet), so Sonnet became 'asked': savings counted against
+    it and the router could never go back to Opus (pricier than asked)."""
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx["requested"]) or "claude-haiku-4-5")
+    sid = "s-resume-0123456789"
+    client.post("/api/route", json={"text": "rename x", "model": "claude-opus-5", "session_id": sid})
+    _mod_session(client, sid, routed="claude-haiku-4-5")
+    again = client.post("/api/route", json={"text": "next", "model": "claude-haiku-4-5", "session_id": sid}).json()
+    assert again["requested"] == "claude-opus-5" and seen[-1] == "claude-opus-5"
