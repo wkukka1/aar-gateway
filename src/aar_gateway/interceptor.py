@@ -244,7 +244,8 @@ def _reset_state() -> None:
     """Every cache and running total the interceptor keeps, emptied: what
     :func:`configure` starts from (and what a test needs between cases)."""
     global _message_models_loaded
-    for state in (_sessions, _cc_sessions, _global_profile, _prefixes, _warm, _blocked, _spawns, _message_models):
+    for state in (_sessions, _cc_sessions, _global_profile, _prefixes, _warm, _blocked, _spawns, _message_models,
+                  _mod_loops, _mod_routes):
         state.clear()
     _message_models_loaded = False
     with _records_lock:
@@ -774,6 +775,10 @@ class _Turn:
             _lru_set(_sessions, self.key, {"model": self.target, "prompt_tokens": tokens, "profile": profile,
                                            "agent": self.agent, "quality": quality, "hold": self.hold_left},
                      _MAX_SESSIONS)
+            if self.claude_session and self.agent is None and self.body.get("tools"):
+                # the session's main loop, for the mod's next routing question (route_text)
+                _lru_set(_mod_loops, f"{self.claude_session[:12]}:main",
+                         {"model": self.target, "prompt_tokens": tokens}, _MAX_SESSIONS)
             if self.body.get("tools"):
                 _global_profile.update(_update_profile(_global_profile, usage))
 
@@ -1404,8 +1409,14 @@ def route_text(text: str, requested: str, session_id: str = "", est_prompt_token
     else:
         body = {"model": requested, "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
                 "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}]}
-        ctx = {"requested": requested, "human_text": text, "est_prompt_tokens": est_prompt_tokens,
-               "last_model": None, "prev_quality": None, "last_prompt_tokens": None, "quality_margin": None,
+        # the session's conversation so far: which model holds it in cache and how long it
+        # is, so the router prices the rewrite a switch costs (seen live: a 250k-token
+        # session moved to Haiku and back cost 10x what staying on Opus would have)
+        loop = _mod_loops.get(f"{session_id[:12]}:main") or {}
+        ctx = {"requested": requested, "human_text": text,
+               "est_prompt_tokens": max(est_prompt_tokens, loop.get("prompt_tokens") or 0),
+               "last_model": loop.get("model"), "prev_quality": None,
+               "last_prompt_tokens": loop.get("prompt_tokens"), "quality_margin": None,
                "allow_upgrade": bool(routing.get("allow_upgrade")), "usage_profile": dict(_global_profile) or None,
                "turn_smoothing": bool(routing.get("turn_smoothing", True)),
                "warm_tokens": {}, "blocked": {}}

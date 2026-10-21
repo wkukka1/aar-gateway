@@ -703,3 +703,24 @@ def test_mod_record_refuses_what_isnt_an_object(env):
     client, settings, _, _ = env
     interceptor.configure(settings, None)
     assert client.post("/api/mod-record", json=[1, 2]).status_code == 400
+
+
+def test_the_mod_asks_the_router_knowing_which_model_holds_the_conversation(env):
+    """Seen live: the mod's route question carried only the prompt text, so the
+    router moved a 250k-token Opus conversation to Haiku (a full cache rewrite,
+    +267%) and back (+900%). It must see the session's model and prompt size."""
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx) or {"model": None, "reason": "kept"})
+    sid = "s-warm-0123456789"
+    usage = {"input_tokens": 2, "output_tokens": 50, "cache_read_input_tokens": 240000, "cache_creation_input_tokens": 9000}
+    client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5",
+                                         "routed_model": "claude-opus-5", "new_turn": True, **usage})
+    client.post("/api/route", json={"text": "rename this variable", "model": "claude-opus-5", "session_id": sid})
+    assert seen[-1]["last_model"] == "claude-opus-5" and seen[-1]["last_prompt_tokens"] == 249002
+    assert seen[-1]["est_prompt_tokens"] == 249002
+    # through the proxy the same: its main-loop requests are remembered for the mod
+    meta = {"metadata": {"user_id": "user_x_account_y_session_s-proxy-0123456789"}}
+    client.post("/v1/messages", json={**turn("first"), **meta}, headers=AUTH)
+    client.post("/api/route", json={"text": "next", "model": "claude-opus-5", "session_id": "s-proxy-0123456789"})
+    assert seen[-1]["last_model"] is not None and seen[-1]["last_prompt_tokens"]
