@@ -602,7 +602,7 @@ def test_the_route_endpoint_answers_for_the_mod_and_the_proxy_keeps_its_choice(e
     client.post("/v1/messages", json=body, headers=AUTH)
     assert calls["anthropic"][-1]["model"] == "claude-haiku-4-5"
     rec = records()[-1]
-    assert rec["reason"] == "routed in Claude Code (mod)"
+    assert rec["reason"] == "routed in Claude Code: cheapest"
     assert rec["requested_model"] == "claude-opus-5" and rec["routed_model"] == "claude-haiku-4-5"
 
 
@@ -637,9 +637,14 @@ def test_every_request_of_a_turn_the_mod_routed_counts_against_the_model_asked_f
     loop = turn([{"type": "tool_result", "tool_use_id": "t1", "content": "def add(a, b): ..."}], model="claude-haiku-4-5")
     client.post("/v1/messages", json={**loop, **meta}, headers=AUTH)
     first, second = records()[-2:]
-    assert first["reason"] == "routed in Claude Code (mod)"
+    assert first["reason"] == "routed in Claude Code: cheapest"
     assert second["requested_model"] == "claude-opus-5" and second["routed_model"] == "claude-haiku-4-5"
     assert second["cost_if_requested_usd"] > second["cost_usd"]
+    # the pane's view: one turn, both requests in it, on Haiku, cheaper than Opus
+    turns = client.get("/api/session-requests", params={"session_id": sid}).json()["turns"]
+    assert len(turns) == 1 and turns[0]["requests"] == 2 and turns[0]["models"] == ["claude-haiku-4-5"]
+    assert turns[0]["reason"] == "routed in Claude Code: cheapest" and turns[0]["saved_pct"] > 0
+    assert len(turns[0]["time"]) == 5  # HH:MM, local time
 
 
 def test_a_prefix_the_routed_model_held_but_did_not_read_is_not_credited_to_the_baseline(env):

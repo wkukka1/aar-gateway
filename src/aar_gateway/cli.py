@@ -1117,7 +1117,7 @@ def _enable_settings(path: Path, url: str, force: bool) -> None:
 MOD_QUESTION = ("Show your gateway savings inside Claude Code too? This adds a Claude Code plugin that reads the "
                 "local gateway's numbers (read-only) and shows them on the status line. [y/N] ")
 MOD_MARKETPLACE = "wkukka1/agentic-llm-router"
-MOD_PLUGIN = "aar-gateway@aar-gateway"
+MOD_PLUGIN = "aptic@deuce-labs"
 MOD_MIN_VERSION = (2, 1, 287)  # Claude Code mods (plugins that run code inside a session)
 
 
@@ -1140,7 +1140,7 @@ def _mod_installed() -> bool:
         out = subprocess.run([claude, "plugin", "list"], capture_output=True, text=True, timeout=30).stdout
     except (OSError, subprocess.SubprocessError):
         return False
-    return "aar-gateway@aar-gateway" in out
+    return MOD_PLUGIN in out
 
 
 def _mod_install() -> bool:
@@ -1168,7 +1168,7 @@ def _mod_install() -> bool:
             print(f"savings in Claude Code: not installed ({(done.stderr or done.stdout).strip()[:160]})")
             return False
     print("savings in Claude Code: installed. Open a new session; the savings show on the status line, "
-          "and `/aar-savings` shows them on demand. `aar-gateway disable` removes it.")
+          "and `/aptic` shows them on demand. `aar-gateway disable` removes it.")
     return True
 
 
@@ -1177,8 +1177,9 @@ def _mod_remove() -> None:
     if claude is None:
         return
     try:  # removing the marketplace also uninstalls its plugin
-        subprocess.run([claude, "plugin", "marketplace", "remove", "aar-gateway"],
-                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        for name in ("deuce-labs", "aar-gateway"):  # aar-gateway: the plugin's name before 0.5
+            subprocess.run([claude, "plugin", "marketplace", "remove", name],
+                           capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         pass
 

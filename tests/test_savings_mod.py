@@ -23,16 +23,16 @@ def real_plugin_functions(monkeypatch):
     monkeypatch.setattr(cli, "_mod_installed", _INSTALLED)
 
 ROOT = Path(__file__).resolve().parents[2]
-MOD = ROOT / "mods" / "aar-gateway"
+MOD = ROOT / "mods" / "aptic"
 
 
 def test_the_marketplace_and_plugin_files_are_valid():
     market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
-    assert market["name"] == "aar-gateway"
+    assert market["name"] == "deuce-labs"
     (entry,) = market["plugins"]
-    assert entry["name"] == "aar-gateway" and entry["source"] == "./mods/aar-gateway"
-    assert (MOD / entry["source"].removeprefix("./mods/aar-gateway") / ".claude-plugin" / "plugin.json").exists()
-    assert json.loads((MOD / ".claude-plugin" / "plugin.json").read_text())["name"] == "aar-gateway"
+    assert entry["name"] == "aptic" and entry["source"] == "./mods/aptic"
+    assert (MOD / entry["source"].removeprefix("./mods/aptic") / ".claude-plugin" / "plugin.json").exists()
+    assert json.loads((MOD / ".claude-plugin" / "plugin.json").read_text())["name"] == "aptic"
     assert json.loads((MOD / "hooks" / "hooks.json").read_text())["modules"] == ["./register.tsx"]
 
 
@@ -72,7 +72,7 @@ def claude(monkeypatch):
 def test_install_adds_the_marketplace_then_the_plugin_at_user_scope(claude):
     assert cli._mod_install() is True
     assert ["plugin", "marketplace", "add", "wkukka1/agentic-llm-router"] in claude.calls
-    assert ["plugin", "install", "aar-gateway@aar-gateway", "--scope", "user"] in claude.calls
+    assert ["plugin", "install", "aptic@deuce-labs", "--scope", "user"] in claude.calls
 
 
 def test_an_old_claude_code_is_told_how_to_update_and_setup_continues(monkeypatch, capsys):
@@ -109,7 +109,7 @@ def test_setup_asks_once_and_only_a_yes_installs(monkeypatch, claude, capsys):
     assert not any("install" in c for c in claude.calls)
     monkeypatch.setattr("builtins.input", lambda prompt: "y" if "Show your gateway savings" in prompt else "n")
     cli.main(["setup", "--no-enable", "--no-share"])
-    assert ["plugin", "install", "aar-gateway@aar-gateway", "--scope", "user"] in claude.calls
+    assert ["plugin", "install", "aptic@deuce-labs", "--scope", "user"] in claude.calls
 
 
 def test_the_flags_decide_without_asking(monkeypatch, claude):
@@ -118,18 +118,18 @@ def test_the_flags_decide_without_asking(monkeypatch, claude):
     monkeypatch.setattr(cli, "_fetch_router", lambda source, target: None)
     monkeypatch.setattr(cli, "_mod_installed", lambda: False)
     cli.main(["setup", "--no-enable", "--no-share", "--mod"])
-    assert ["plugin", "install", "aar-gateway@aar-gateway", "--scope", "user"] in claude.calls
+    assert ["plugin", "install", "aptic@deuce-labs", "--scope", "user"] in claude.calls
 
 
 def test_disable_removes_the_plugin(monkeypatch, claude, tmp_path):
     monkeypatch.setattr(cli, "_claude_settings_path", lambda: tmp_path / "settings.json")
     monkeypatch.setattr(cli, "_service", lambda action, run=None: 0)
     cli._mod_remove()
-    assert ["plugin", "marketplace", "remove", "aar-gateway"] in claude.calls
+    assert ["plugin", "marketplace", "remove", "deuce-labs"] in claude.calls
 
 
 def test_the_mods_own_tests_pass():
-    """mods/aar-gateway/tests run under Claude Code's test kit (needs `claude`)."""
+    """mods/aptic/tests run under Claude Code's test kit (needs `claude`)."""
     import shutil as sh
 
     if sh.which("claude") is None:

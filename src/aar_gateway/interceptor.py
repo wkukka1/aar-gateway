@@ -880,8 +880,8 @@ async def _decide(turn: _Turn) -> None:
         # the mod switched this turn's model inside Claude Code: keep it on every
         # request of the turn, and count savings against the model asked for
         turn.target, turn.requested = turn.requested, mod_route["asked"]
-        turn.decision = {"reason": "routed in Claude Code (mod)" if turn.human is not None
-                         else "same turn as the previous request"}
+        turn.decision = {"reason": f"routed in Claude Code: {mod_route.get('reason') or 'router'}"
+                         if turn.human is not None else "same turn as the previous request"}
         return
     previous = thread_previous(turn.body)
     if previous:
@@ -1418,7 +1418,8 @@ def route_text(text: str, requested: str, session_id: str = "", est_prompt_token
         pick = {"model": (picked or {}).get("model"), "reason": (picked or {}).get("reason") or "router",
                 "predicted_quality": (picked or {}).get("predicted_quality")}
     if pick["model"] and session_id:
-        _mod_routes[session_id[:12]] = {"asked": requested, "model": pick["model"], "at": time.monotonic()}
+        _mod_routes[session_id[:12]] = {"asked": requested, "model": pick["model"], "at": time.monotonic(),
+                                        "reason": pick["reason"]}
     return {**pick, "requested": requested}
 
 
@@ -1436,6 +1437,14 @@ def _mod_route_for(turn: _Turn) -> dict | None:
 #: per (session, loop): the model and prompt size of its previous reported request,
 #: for the baseline of the next (as the proxy keeps per conversation)
 _mod_loops: OrderedDict[str, dict] = OrderedDict()
+
+
+def _mod_reason(session: str, report: Mapping, routed: str, asked: str) -> str:
+    if report.get("agent_id") or not report.get("new_turn"):
+        return "same turn as the previous request"
+    route = _mod_routes.get(session)
+    return f"routed in Claude Code: {route.get('reason') or 'router'}" if route else (
+        "routed in Claude Code" if routed != asked else "as asked")
 
 
 def record_from_mod(report: Mapping) -> dict:
@@ -1463,7 +1472,7 @@ def record_from_mod(report: Mapping) -> dict:
         "subagent": bool(report.get("agent_id")), "agent_role": report.get("agent_role"), "role_source": "mod",
         "baseline_model": None, "report_tokens": None,
         "requested_model": asked, "routed_model": routed, "lane": "anthropic",
-        "reason": str(report.get("reason") or ("routed in Claude Code (mod)" if routed != asked else "as asked"))[:120],
+        "reason": str(report.get("reason") or _mod_reason(session, report, routed, asked))[:120],
         "fallback": False, "attempted_model": None, "error": None, "thread": None, "status": 200,
         "latency_s": None, **usage,
         "cost_usd": cost_usd(price_for(_settings, routed), usage),
@@ -1488,7 +1497,50 @@ def session_requests(session_id: str, limit: int = 40) -> dict:
     cost, base = sum(r["cost_usd"] for r in priced), sum(r["cost_if_requested_usd"] for r in priced)
     return {"session": key, "requests": len(mine),
             "saved_pct": round(100 * (1 - cost / base), 1) if base else None,
-            "recent": [{k: r.get(k) for k in fields} for r in mine[-max(1, min(limit, 200)):]]}
+            "recent": [{k: r.get(k) for k in fields} for r in mine[-max(1, min(limit, 200)):]],
+            "turns": session_turns(mine)[-max(1, min(limit, 200)):]}
+
+
+def session_turns(records: list[dict]) -> list[dict]:
+    """A session's requests grouped into the turns the person typed: a turn
+    starts with a main-loop request carrying new prompt text; its tool loop,
+    side requests and subagents join it. Times are this machine's local time."""
+    turns: list[dict] = []
+    for r in records:
+        side = str(r.get("reason") or "").startswith("side request")
+        if not turns or (r.get("new_turn") and not r.get("subagent") and not side):
+            try:
+                at = datetime.fromisoformat(r["ts"]).astimezone().strftime("%H:%M")
+            except (KeyError, TypeError, ValueError):
+                at = ""
+            turns.append({"time": at, "requested_model": r.get("requested_model"), "models": [],
+                          "reason": r.get("reason"), "requests": 0, "side_requests": 0, "errors": 0,
+                          "cache_read": 0, "cache_written": 0, "fresh": 0,
+                          "cost_usd": 0.0, "cost_if_requested_usd": 0.0, "subagents": []})
+        t = turns[-1]
+        t["errors"] += r.get("status") != 200
+        if r.get("cost_usd") is not None and r.get("cost_if_requested_usd"):
+            t["cost_usd"] += r["cost_usd"]
+            t["cost_if_requested_usd"] += r["cost_if_requested_usd"]
+        if r.get("subagent"):
+            role = r.get("agent_role") or "subagent"
+            sub = next((s for s in t["subagents"] if s["role"] == role and s["model"] == r.get("routed_model")), None)
+            if sub is None:
+                t["subagents"].append(sub := {"role": role, "model": r.get("routed_model"), "requests": 0})
+            sub["requests"] += 1
+        elif side:
+            t["side_requests"] += 1
+        else:
+            t["requests"] += 1
+            t["cache_read"] += r.get("cache_read_input_tokens") or 0
+            t["cache_written"] += r.get("cache_creation_input_tokens") or 0
+            t["fresh"] += r.get("input_tokens") or 0
+            if r.get("routed_model") and r["routed_model"] not in t["models"]:
+                t["models"].append(r["routed_model"])
+    for t in turns:
+        base = t["cost_if_requested_usd"]
+        t["saved_pct"] = round(100 * (1 - t["cost_usd"] / base)) if base else None
+    return turns
 
 
 def session_summary(session_id: str) -> dict:
