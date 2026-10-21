@@ -206,8 +206,10 @@ async def route(request: Request):
         est = int(body.get("est_prompt_tokens") or 0)
     except (TypeError, ValueError):
         est = 0
+    blocked = body.get("blocked")
+    blocked = [str(m) for m in blocked][:20] if isinstance(blocked, list) else None
     return await run_in_threadpool(interceptor.route_text, str(body.get("text") or ""),
-                                   str(body.get("model") or ""), str(body.get("session_id") or ""), est)
+                                   str(body.get("model") or ""), str(body.get("session_id") or ""), est, blocked)
 
 
 @app.post("/api/subagent-spawn")

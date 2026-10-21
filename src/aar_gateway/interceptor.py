@@ -777,8 +777,9 @@ class _Turn:
                      _MAX_SESSIONS)
             if self.claude_session and self.agent is None and self.body.get("tools"):
                 # the session's main loop, for the mod's next routing question (route_text)
-                _lru_set(_mod_loops, f"{self.claude_session[:12]}:main",
-                         {"model": self.target, "prompt_tokens": tokens}, _MAX_SESSIONS)
+                main = f"{self.claude_session[:12]}:main"
+                _lru_set(_mod_loops, main, {**(_mod_loops.get(main) or {}), "model": self.target,
+                                            "prompt_tokens": tokens, "profile": profile}, _MAX_SESSIONS)
             if self.body.get("tools"):
                 _global_profile.update(_update_profile(_global_profile, usage))
 
@@ -1394,40 +1395,58 @@ _mod_routes: dict[str, dict] = {}
 MOD_ROUTE_SECONDS = 120.0
 
 
-def route_text(text: str, requested: str, session_id: str = "", est_prompt_tokens: int = 0) -> dict:
+def route_text(text: str, requested: str, session_id: str = "", est_prompt_tokens: int = 0,
+               blocked: list | None = None) -> dict:
     """The model the router picks for a prompt, for a caller that switches the
-    model itself (the Claude Code mod). Never raises: ``{"model": None,
-    "reason": ...}`` means keep the model asked for."""
+    model itself (the Claude Code mod), under the proxy's rules (_decide): the
+    pinned model only when it fits, the correction hold, and the session's
+    conversation so far -- the model holding its cache and its length (seen
+    live: a 250k-token session moved to Haiku and back cost 10x what staying
+    on Opus would have), the last turn's quality for smoothing, and the
+    models that failed earlier in it. Never raises: ``{"model": None, ...}``
+    means keep the model asked for."""
     routing = _settings.get("routing") or {}
     keep = {"model": None, "requested": requested}
+    key = f"{session_id[:12]}:main"
+    loop = _mod_loops.get(key) or {}
+    est = max(est_prompt_tokens, loop.get("prompt_tokens") or 0)
+    failed = {str(m): "failed earlier in this session" for m in (blocked or [])}
+    body = {"model": requested, "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}]}
     if routing.get("mode") == "off":
         return {**keep, "reason": "routing off (dashboard)"}
     if routing.get("mode") == "pin":
-        pick = {"model": routing["pinned_model"], "reason": "pinned (dashboard)"}
+        pinned = routing["pinned_model"]
+        why = unavailable_reason(pinned, body, _settings, failed, est)
+        pick = ({"model": None, "reason": f"pinned {pinned} can't take this request ({why})"} if why
+                else {"model": pinned, "reason": "pinned (dashboard)"})
+    elif text and is_correction(text) and loop.get("model") not in (None, requested) or loop.get("hold", 0) > 0:
+        # after "that's wrong" on a rerouted answer: the model asked for, for a few turns
+        hold = CORRECTION_HOLD_TURNS if is_correction(text) else loop["hold"]
+        _lru_set(_mod_loops, key, {**loop, "hold": hold - 1}, _MAX_SESSIONS)
+        pick = {"model": requested, "reason": "after a correction: staying on the model you asked for "
+                                              f"({hold - 1} more turn{'s' if hold - 1 != 1 else ''})"}
     elif _picker is None or not text.strip():
         return {**keep, "reason": "no router loaded" if _picker is None else "no prompt text"}
     else:
-        body = {"model": requested, "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
-                "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}]}
-        # the session's conversation so far: which model holds it in cache and how long it
-        # is, so the router prices the rewrite a switch costs (seen live: a 250k-token
-        # session moved to Haiku and back cost 10x what staying on Opus would have)
-        loop = _mod_loops.get(f"{session_id[:12]}:main") or {}
-        ctx = {"requested": requested, "human_text": text,
-               "est_prompt_tokens": max(est_prompt_tokens, loop.get("prompt_tokens") or 0),
-               "last_model": loop.get("model"), "prev_quality": None,
+        ctx = {"requested": requested, "human_text": text, "est_prompt_tokens": est,
+               "last_model": loop.get("model"), "prev_quality": loop.get("quality"),
                "last_prompt_tokens": loop.get("prompt_tokens"), "quality_margin": None,
-               "allow_upgrade": bool(routing.get("allow_upgrade")), "usage_profile": dict(_global_profile) or None,
+               "allow_upgrade": bool(routing.get("allow_upgrade")),
+               "usage_profile": loop.get("profile") or dict(_global_profile) or None,
                "turn_smoothing": bool(routing.get("turn_smoothing", True)),
-               "warm_tokens": {}, "blocked": {}}
+               "warm_tokens": {}, "blocked": failed}
         try:
             picked = _picker(body, ctx)
         except Exception as exc:  # noqa: BLE001 -- a router failure keeps the asked model
             return {**keep, "reason": f"router error: {type(exc).__name__}"}
         if isinstance(picked, str):
             picked = {"model": picked, "reason": "picker"}
-        pick = {"model": (picked or {}).get("model"), "reason": (picked or {}).get("reason") or "router",
-                "predicted_quality": (picked or {}).get("predicted_quality")}
+        picked = picked or {}
+        if picked.get("model_quality"):
+            _lru_set(_mod_loops, key, {**loop, "quality": picked["model_quality"]}, _MAX_SESSIONS)
+        pick = {"model": picked.get("model"), "reason": picked.get("reason") or "router",
+                "predicted_quality": picked.get("predicted_quality")}
     if pick["model"] and session_id:
         _mod_routes[session_id[:12]] = {"asked": requested, "model": pick["model"], "at": time.monotonic(),
                                         "reason": pick["reason"]}
@@ -1474,7 +1493,9 @@ def record_from_mod(report: Mapping) -> dict:
     else:
         warm = loop.get("prompt_tokens", 0) if loop.get("model") and canonical_model(loop["model"]) == canonical_model(asked) else 0
     baseline = _warm_usage(usage, warm)
-    _lru_set(_mod_loops, loop_key, {"model": routed, "prompt_tokens": prompt_tokens(usage)}, _MAX_SESSIONS)
+    _lru_set(_mod_loops, loop_key, {**loop, "model": routed, "prompt_tokens": prompt_tokens(usage),
+                                    "profile": _update_profile(loop.get("profile") or {}, usage)}, _MAX_SESSIONS)
+    _global_profile.update(_update_profile(_global_profile, usage))
     strongest = _settings.get("strongest")
     record = {
         "ts": datetime.now(UTC).isoformat(timespec="seconds"),

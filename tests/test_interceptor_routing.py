@@ -724,3 +724,46 @@ def test_the_mod_asks_the_router_knowing_which_model_holds_the_conversation(env)
     client.post("/v1/messages", json={**turn("first"), **meta}, headers=AUTH)
     client.post("/api/route", json={"text": "next", "model": "claude-opus-5", "session_id": "s-proxy-0123456789"})
     assert seen[-1]["last_model"] is not None and seen[-1]["last_prompt_tokens"]
+
+
+def _mod_session(client, sid, routed="claude-haiku-4-5"):
+    client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5", "routed_model": routed,
+                                         "new_turn": True, "input_tokens": 5, "output_tokens": 50,
+                                         "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 100})
+
+
+def test_the_mod_route_keeps_the_proxys_rules(env):
+    """The rules the proxy applies to a turn apply when the mod asks too:
+    smoothing gets the last turn's quality, a correction holds the model asked
+    for, a model that failed in the session isn't picked, a pin must fit."""
+    client, settings, _, _ = env
+    seen = []
+
+    def picker(body, ctx):
+        seen.append(ctx)
+        return {"model": "claude-haiku-4-5", "reason": "cheapest", "model_quality": {"claude-haiku-4-5": 0.6}}
+    interceptor.configure(settings, picker)
+    sid = "s-rules-0123456789"
+    _mod_session(client, sid)
+    route = lambda text, **kw: client.post("/api/route", json={"text": text, "model": "claude-opus-5",  # noqa: E731
+                                                              "session_id": sid, **kw}).json()
+    route("rename this variable")
+    assert route("now the next one")["model"] == "claude-haiku-4-5"
+    assert seen[-1]["prev_quality"] == {"claude-haiku-4-5": 0.6}  # smoothing sees the last turn
+    assert seen[-1]["usage_profile"]  # this session's own token profile
+    # a correction after a rerouted answer: the model asked for, for the next turns too
+    calls = len(seen)
+    held = route("that's wrong, try again")
+    assert held["model"] == "claude-opus-5" and "after a correction" in held["reason"]
+    assert route("ok continue")["model"] == "claude-opus-5" and len(seen) == calls  # the router wasn't asked
+    # a model that failed in this session reaches the router as blocked
+    for _ in range(interceptor.CORRECTION_HOLD_TURNS):  # the hold runs out
+        route("next")
+    route("another", blocked=["claude-haiku-4-5"])
+    assert "after a correction" not in seen[-1].get("reason", "")
+    assert seen[-1]["blocked"] == {"claude-haiku-4-5": "failed earlier in this session"}
+    # a pinned model that can't take the conversation isn't used
+    client.post("/api/preferences", json={"mode": "pin", "pinned_model": "claude-haiku-4-5"})
+    settings["models"]["claude-haiku-4-5"]["context_window"] = 1000
+    pinned = route("anything")
+    assert pinned["model"] is None and "can't take this request" in pinned["reason"]
