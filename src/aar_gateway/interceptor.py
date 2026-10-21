@@ -1433,6 +1433,49 @@ def _mod_route_for(turn: _Turn) -> dict | None:
     return None
 
 
+#: per (session, loop): the model and prompt size of its previous reported request,
+#: for the baseline of the next (as the proxy keeps per conversation)
+_mod_loops: OrderedDict[str, dict] = OrderedDict()
+
+
+def record_from_mod(report: Mapping) -> dict:
+    """Log a request the Claude Code mod saw but the proxy didn't (a session
+    that talks to Anthropic directly while the mod routes): priced the way the
+    proxy prices its own. The baseline is the model asked for, with this
+    loop's previous prompt in its cache when the previous request ran there."""
+    usage = {k: int(report.get(k) or 0) for k in
+             ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
+    asked, routed = str(report.get("requested_model") or ""), str(report.get("routed_model") or "")
+    session = str(report.get("session_id") or "")[:12]
+    loop_key = f"{session}:{report.get('agent_id') or 'main'}"
+    loop = _mod_loops.get(loop_key) or {}
+    if canonical_model(routed) == canonical_model(asked):
+        warm = loop.get("prompt_tokens", 0) if loop.get("model") and canonical_model(loop["model"]) != canonical_model(asked) else 0
+    else:
+        warm = loop.get("prompt_tokens", 0) if loop.get("model") and canonical_model(loop["model"]) == canonical_model(asked) else 0
+    baseline = _warm_usage(usage, warm)
+    _lru_set(_mod_loops, loop_key, {"model": routed, "prompt_tokens": prompt_tokens(usage)}, _MAX_SESSIONS)
+    strongest = _settings.get("strongest")
+    record = {
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "claude_session": session or None, "conversation": loop_key,
+        "new_turn": bool(report.get("new_turn")), "turn_trigger": None, "correction": False,
+        "subagent": bool(report.get("agent_id")), "agent_role": report.get("agent_role"), "role_source": "mod",
+        "baseline_model": None, "report_tokens": None,
+        "requested_model": asked, "routed_model": routed, "lane": "anthropic",
+        "reason": str(report.get("reason") or ("routed in Claude Code (mod)" if routed != asked else "as asked"))[:120],
+        "fallback": False, "attempted_model": None, "error": None, "thread": None, "status": 200,
+        "latency_s": None, **usage,
+        "cost_usd": cost_usd(price_for(_settings, routed), usage),
+        "cost_if_requested_usd": cost_usd(price_for(_settings, asked), baseline),
+        "strongest_model": strongest, "cost_if_strongest_usd": cost_usd(price_for(_settings, strongest), baseline),
+        "predicted_quality": None, "best_predicted_quality": None, "candidates": None,
+        "quality_margin": None, "quality_source": "mod",
+    }
+    _append_record(record)
+    return {"logged": True, "cost_usd": record["cost_usd"], "cost_if_requested_usd": record["cost_if_requested_usd"]}
+
+
 def session_requests(session_id: str, limit: int = 40) -> dict:
     """One Claude Code session's recent requests for the mod's pane: models,
     why, cache use and cost against the model asked for. No prompt text."""

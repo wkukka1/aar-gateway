@@ -671,3 +671,30 @@ def test_turn_smoothing_is_on_by_default_and_turning_it_off_warns(env):
     client.post("/v1/messages", json=turn("next"), headers=AUTH)
     assert seen == [False]  # reaches the router
     assert client.post("/api/preferences", json={"turn_smoothing": True}).json()["turn_smoothing_warning"] is None
+
+
+def test_a_request_the_mod_reports_is_priced_and_shows_in_its_session(env):
+    """A plugin-only session: Claude Code talks to Anthropic directly, so the
+    mod reports each request's usage and the gateway prices it as its own."""
+    client, settings, calls, _ = env
+    interceptor.configure(settings, None)
+    sid = "s-direct-0123456789"
+    usage = {"input_tokens": 5, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 20000}
+    same = client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5",
+                                                "routed_model": "claude-opus-5", "new_turn": True, **usage}).json()
+    assert same["cost_usd"] == pytest.approx(same["cost_if_requested_usd"])  # nothing rerouted: its own baseline
+    moved = client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5",
+                                                 "routed_model": "claude-haiku-4-5", "new_turn": True, **usage}).json()
+    # Opus held this loop's 20k-token prompt, so without the switch it would have read it
+    warm = {"input_tokens": 5, "output_tokens": 100, "cache_read_input_tokens": 20000, "cache_creation_input_tokens": 0}
+    assert moved["cost_if_requested_usd"] == pytest.approx(cost_usd(CLAUDE_PRICES["claude-opus-5"], warm))
+    assert moved["cost_usd"] == pytest.approx(cost_usd(CLAUDE_PRICES["claude-haiku-4-5"], usage))
+    assert calls["anthropic"] == []  # nothing was sent anywhere
+    data = client.get("/api/session-requests", params={"session_id": sid}).json()
+    assert data["requests"] == 2
+
+
+def test_mod_record_refuses_what_isnt_an_object(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    assert client.post("/api/mod-record", json=[1, 2]).status_code == 400

@@ -183,6 +183,14 @@ async def _json_object(request: Request) -> dict:
     return body
 
 
+@app.post("/api/mod-record")
+async def mod_record(request: Request):
+    """A request the Claude Code mod saw that didn't come through this proxy:
+    its token usage, priced and logged like the proxy's own."""
+    body = await _json_object(request)
+    return await run_in_threadpool(interceptor.record_from_mod, body)
+
+
 @app.get("/api/session-requests")
 def session_requests(session_id: str = "", limit: int = 40):  # plain def: reads the log off the event loop
     """One session's recent requests, for the Claude Code mod's pane."""
