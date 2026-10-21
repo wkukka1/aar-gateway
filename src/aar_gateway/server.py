@@ -222,6 +222,8 @@ async def update_preferences(request: Request):
     try:
         if "mode" in body:
             return interceptor.set_routing(body["mode"], body.get("pinned_model"))
+        if "turn_smoothing" in body:
+            return interceptor.set_turn_smoothing(bool(body["turn_smoothing"]))
         if "allow_upgrade" in body:
             return interceptor.set_allow_upgrade(bool(body["allow_upgrade"]))
         if "role" in body:

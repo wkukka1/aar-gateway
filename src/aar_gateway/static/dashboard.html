@@ -255,6 +255,11 @@
               <input type="range" id="margin" min="0" max="0.3" step="0.01">
               <output id="margin-val" for="margin"></output>
             </label>
+            <label class="toggle"><input type="checkbox" id="turn-smoothing">
+              <span><strong>Turn smoothing</strong> (recommended)<br>
+              <span class="hint">Blends each message's prediction with the previous one, so a conversation doesn't switch model back and forth.</span>
+              <br><span class="hint" style="color: var(--bad)" id="turn-smoothing-warning" hidden></span></span>
+            </label>
             <label class="toggle"><input type="checkbox" id="allow-upgrade">
               <span><strong>Let hard turns go up a tier</strong><br>
               <span class="hint">e.g. a Haiku session sends a hard question to Opus. Off: routing only ever moves you to a cheaper model.</span></span>
@@ -488,6 +493,9 @@ function renderPrefs() {
   $("margin").value = m;
   $("margin-val").textContent = m.toFixed(2);
   $("allow-upgrade").checked = !!prefs.allow_upgrade;
+  $("turn-smoothing").checked = prefs.turn_smoothing !== false;
+  $("turn-smoothing-warning").hidden = !prefs.turn_smoothing_warning;
+  $("turn-smoothing-warning").textContent = prefs.turn_smoothing_warning || "";
   if (!document.activeElement || !document.activeElement.closest("#roles")) {
     $("roles").innerHTML = prefs.roles.map((r) => {
       const tierLabel = (x) => x == null ? "session's model" : short(x);
@@ -638,6 +646,7 @@ document.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("clic
   setPref({mode: b.dataset.mode, pinned_model: b.dataset.mode === "pin" ? $("pin-model").value : undefined})));
 $("pin-model").addEventListener("change", (e) => setPref({mode: "pin", pinned_model: e.target.value}));
 $("allow-upgrade").addEventListener("change", (e) => setPref({allow_upgrade: e.target.checked}));
+$("turn-smoothing").addEventListener("change", (e) => setPref({turn_smoothing: e.target.checked}));
 $("margin").addEventListener("input", (e) => { $("margin-val").textContent = parseFloat(e.target.value).toFixed(2); });
 $("margin").addEventListener("change", (e) => setPref({quality_margin: parseFloat(e.target.value)}));
 $("roles").addEventListener("change", (e) => {

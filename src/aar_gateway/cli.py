@@ -638,6 +638,10 @@ def _doctor(as_json: bool = False) -> int:
         else:
             report(None, "router", "off: requests go through unrouted", "set interceptor.router.enabled: true")
         report(True, "gateway running", url)
+        prefs = _get(f"{url}/api/preferences") or {}
+        if prefs.get("turn_smoothing") is False:
+            report(None, "turn smoothing", "off: a conversation can switch model back and forth, rebuilding the "
+                   "cache each time", "turn it back on: dashboard, Advanced settings")
     else:
         if settings and settings["router"].get("enabled"):
             report(None, "router", "enabled in the config; it loads when the gateway starts",

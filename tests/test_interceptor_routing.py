@@ -657,3 +657,17 @@ def test_a_prefix_the_routed_model_held_but_did_not_read_is_not_credited_to_the_
     rec = records()[-1]
     assert rec["routed_model"] == "claude-haiku-4-5"
     assert rec["cost_if_requested_usd"] > rec["cost_usd"]  # Opus writing 20k costs more than Haiku writing it
+
+
+def test_turn_smoothing_is_on_by_default_and_turning_it_off_warns(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    prefs = client.get("/api/preferences").json()
+    assert prefs["turn_smoothing"] is True and prefs["turn_smoothing_warning"] is None
+    off = client.post("/api/preferences", json={"turn_smoothing": False}).json()
+    assert off["turn_smoothing"] is False and "switch model back and forth" in off["turn_smoothing_warning"]
+    seen = []
+    interceptor.set_model_picker(lambda body, ctx: seen.append(ctx["turn_smoothing"]))
+    client.post("/v1/messages", json=turn("next"), headers=AUTH)
+    assert seen == [False]  # reaches the router
+    assert client.post("/api/preferences", json={"turn_smoothing": True}).json()["turn_smoothing_warning"] is None

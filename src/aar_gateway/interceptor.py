@@ -266,7 +266,8 @@ def configure(settings: dict, picker: ModelPicker | None, router_error: str | No
     if saved.get("quality_margin") is not None:
         _settings["router"]["margin"] = saved["quality_margin"]
     _settings["routing"] = {"mode": saved.get("mode", "auto"), "pinned_model": saved.get("pinned_model"),
-                            "allow_upgrade": bool(saved.get("allow_upgrade", False))}
+                            "allow_upgrade": bool(saved.get("allow_upgrade", False)),
+                            "turn_smoothing": bool(saved.get("turn_smoothing", True))}
     _config_roles.clear()
     _config_roles.update(_settings["subagents"].get("roles") or {})
     _settings["subagents"]["roles"] = {**_config_roles, **(saved.get("role_models") or {})}
@@ -291,6 +292,8 @@ def preferences() -> dict:
             "strongest_model": _settings.get("strongest"),
             "header": MARGIN_HEADER, "mode": routing["mode"], "pinned_model": routing["pinned_model"],
             "allow_upgrade": bool(routing.get("allow_upgrade")),
+            "turn_smoothing": bool(routing.get("turn_smoothing", True)),
+            "turn_smoothing_warning": None if routing.get("turn_smoothing", True) else TURN_SMOOTHING_WARNING,
             "models": list(_settings["models"]),
             # what the dropdowns show next to a model that isn't Claude
             "model_notes": {m: ("local" if "127.0.0.1" in (spec.get("base_url") or "") or "localhost" in
@@ -342,6 +345,21 @@ def set_routing(mode: str, pinned_model: str | None = None) -> dict:
     _settings["routing"] = {**before, "mode": mode, "pinned_model": pinned}
     _save_preferences(mode=mode, pinned_model=pinned)
     _log_override({"kind": "routing", "from": before, "to": _settings["routing"]})
+    return preferences()
+
+
+TURN_SMOOTHING_WARNING = ("Turn smoothing is off: each message is judged on its own, so a conversation can "
+                          "switch model back and forth between messages, and every switch makes the new model "
+                          "re-read the whole conversation into its cache (seen as +1200% requests).")
+
+
+def set_turn_smoothing(on: bool) -> dict:
+    """Whether each turn's prediction is blended with the previous turn's
+    (on by default: it stops a conversation flip-flopping between models)."""
+    before = dict(_settings.get("routing") or {})
+    _settings["routing"] = {**before, "turn_smoothing": bool(on)}
+    _save_preferences(turn_smoothing=bool(on))
+    _log_override({"kind": "turn_smoothing", "from": bool(before.get("turn_smoothing", True)), "to": bool(on)})
     return preferences()
 
 
@@ -921,6 +939,7 @@ async def _decide(turn: _Turn) -> None:
            "last_prompt_tokens": turn.session.get("prompt_tokens"),
            "quality_margin": _request_margin(turn.request),
            "allow_upgrade": bool(routing.get("allow_upgrade")),
+           "turn_smoothing": bool(routing.get("turn_smoothing", True)),
            "usage_profile": turn.session.get("profile") or dict(_global_profile) or None,
            "warm_tokens": _warm_tokens(turn.sig),
            "blocked": _blocked_for(turn)}
@@ -1388,6 +1407,7 @@ def route_text(text: str, requested: str, session_id: str = "", est_prompt_token
         ctx = {"requested": requested, "human_text": text, "est_prompt_tokens": est_prompt_tokens,
                "last_model": None, "prev_quality": None, "last_prompt_tokens": None, "quality_margin": None,
                "allow_upgrade": bool(routing.get("allow_upgrade")), "usage_profile": dict(_global_profile) or None,
+               "turn_smoothing": bool(routing.get("turn_smoothing", True)),
                "warm_tokens": {}, "blocked": {}}
         try:
             picked = _picker(body, ctx)
