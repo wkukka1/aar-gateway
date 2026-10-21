@@ -1396,7 +1396,7 @@ MOD_ROUTE_SECONDS = 120.0
 
 
 def route_text(text: str, requested: str, session_id: str = "", est_prompt_tokens: int = 0,
-               blocked: list | None = None) -> dict:
+               blocked: list | None = None, resumed: bool = False) -> dict:
     """The model the router picks for a prompt, for a caller that switches the
     model itself (the Claude Code mod), under the proxy's rules (_decide): the
     pinned model only when it fits, the correction hold, and the session's
@@ -1408,10 +1408,10 @@ def route_text(text: str, requested: str, session_id: str = "", est_prompt_token
     routing = _settings.get("routing") or {}
     key = f"{session_id[:12]}:main"
     loop = dict(_mod_loops.get(key) or {})
-    if loop.get("asked") and requested == loop.get("model") and requested != loop["asked"]:
-        # a resumed session (claude -c) restarts on the model the mod last switched it to,
-        # which Claude Code recorded: the person asked for the one before.
-        # shortcut: a /model choice of the model already in use reads the same; rare
+    if resumed and loop.get("asked") and requested == loop.get("model") and requested != loop["asked"]:
+        # `claude -c` restarts on the model the mod last switched to, which Claude Code
+        # recorded as the session's: the person asked for the one before. Only a session
+        # Claude Code reports as resumed, so a /model choice of that same model stays put.
         requested = loop["asked"]
     if session_id:
         loop["asked"] = requested

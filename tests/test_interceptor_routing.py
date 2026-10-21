@@ -779,5 +779,19 @@ def test_a_resumed_session_is_routed_against_the_model_first_asked_for(env):
     sid = "s-resume-0123456789"
     client.post("/api/route", json={"text": "rename x", "model": "claude-opus-5", "session_id": sid})
     _mod_session(client, sid, routed="claude-haiku-4-5")
-    again = client.post("/api/route", json={"text": "next", "model": "claude-haiku-4-5", "session_id": sid}).json()
+    again = client.post("/api/route", json={"text": "next", "model": "claude-haiku-4-5", "session_id": sid,
+                                            "resumed": True}).json()
     assert again["requested"] == "claude-opus-5" and seen[-1] == "claude-opus-5"
+
+
+def test_a_model_choice_of_the_model_already_routed_to_is_not_read_as_a_resume(env):
+    """A /model choice of the model the session is already routed to isn't a
+    resume: the person asked for that model, and it stays."""
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx["requested"]) or "claude-haiku-4-5")
+    sid = "s-model-0123456789"
+    client.post("/api/route", json={"text": "rename x", "model": "claude-opus-5", "session_id": sid})
+    _mod_session(client, sid, routed="claude-haiku-4-5")
+    chosen = client.post("/api/route", json={"text": "next", "model": "claude-haiku-4-5", "session_id": sid}).json()
+    assert chosen["requested"] == "claude-haiku-4-5" and seen[-1] == "claude-haiku-4-5"
