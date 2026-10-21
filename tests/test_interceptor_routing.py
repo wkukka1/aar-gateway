@@ -551,3 +551,247 @@ def test_thread_models_survive_a_restart(env):
     interceptor._message_models_loaded = False
     assert interceptor._message_model("msg_kept") == "claude-haiku-4-5"
 
+
+
+def test_a_request_on_the_asked_model_is_its_own_baseline(env):
+    """Seen live as +1251%: a new session on Opus, not rerouted, had to write
+    its cache; the baseline borrowed another conversation's cached prefix and
+    priced the same request as if read. Nothing was rerouted, so nothing changed."""
+    client, settings, _, state = env
+    interceptor.configure(settings, lambda body, ctx: None)
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 20000}
+    client.post("/v1/messages", json=turn("first project"), headers=AUTH)
+    other = {**turn("another project"), "metadata": {"user_id": "user_x_account_y_session_other"}}
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 23000,
+                      "cache_read_input_tokens": 0}
+    client.post("/v1/messages", json=other, headers=AUTH)
+    rec = records()[-1]
+    assert rec["routed_model"] == rec["requested_model"]
+    assert rec["cost_if_requested_usd"] == pytest.approx(rec["cost_usd"])
+
+
+def test_switching_back_still_counts_the_cache_the_reroute_cost(env):
+    """Turn 2 went to Haiku; turn 3 returns to Opus and rewrites its cache.
+    Without the router Opus would have kept it, so that rewrite is the router's."""
+    client, settings, _, state = env
+    interceptor.configure(settings, lambda body, ctx: None)
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 1000}
+    client.post("/v1/messages", json=turn("first"), headers=AUTH)
+    interceptor.set_model_picker(lambda body, ctx: "claude-haiku-4-5")
+    client.post("/v1/messages", json=turn("second"), headers=AUTH)
+    interceptor.set_model_picker(lambda body, ctx: None)
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 1300}
+    client.post("/v1/messages", json=turn("third"), headers=AUTH)
+    rec = records()[-1]
+    assert rec["routed_model"] == "claude-opus-5"
+    assert rec["cost_if_requested_usd"] < rec["cost_usd"]  # the warm baseline: the reroute cost this
+
+
+def test_the_route_endpoint_answers_for_the_mod_and_the_proxy_keeps_its_choice(env):
+    """The mod asks which model, switches the turn itself; the proxy then keeps
+    that model (no second routing) and still counts against the model asked for."""
+    client, settings, calls, _ = env
+    interceptor.configure(settings, lambda body, ctx: {"model": "claude-haiku-4-5", "reason": "cheapest"})
+    sid = "s-mod-0123456789"
+    picked = client.post("/api/route", json={"text": "rename this variable", "model": "claude-opus-5",
+                                            "session_id": sid}).json()
+    assert picked["model"] == "claude-haiku-4-5" and picked["requested"] == "claude-opus-5"
+    interceptor.set_model_picker(lambda body, ctx: pytest.fail("the proxy routed a turn the mod had routed"))
+    body = {**turn("rename this variable", model="claude-haiku-4-5"),
+            "metadata": {"user_id": f"user_x_account_y_session_{sid}"}}
+    client.post("/v1/messages", json=body, headers=AUTH)
+    assert calls["anthropic"][-1]["model"] == "claude-haiku-4-5"
+    rec = records()[-1]
+    assert rec["reason"] == "routed in Claude Code: cheapest"
+    assert rec["requested_model"] == "claude-opus-5" and rec["routed_model"] == "claude-haiku-4-5"
+
+
+def test_the_route_endpoint_keeps_the_model_when_routing_is_off_or_fails(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, lambda body, ctx: 1 / 0)
+    assert client.post("/api/route", json={"text": "hi", "model": "claude-opus-5"}).json()["model"] is None
+    assert client.post("/api/route", json=["not", "an", "object"]).status_code == 400
+
+
+def test_session_requests_lists_one_sessions_requests_without_text(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    sid = "s-pane-0123456789"
+    client.post("/v1/messages", json={**turn("secret words"), "metadata": {"user_id": f"user_x_account_y_session_{sid}"}},
+                headers=AUTH)
+    client.post("/v1/messages", json=turn("someone else's"), headers=AUTH)
+    data = client.get("/api/session-requests", params={"session_id": sid}).json()
+    assert data["requests"] == 1 and data["recent"][0]["requested_model"] == "claude-opus-5"
+    assert "secret" not in json.dumps(data)
+
+
+def test_every_request_of_a_turn_the_mod_routed_counts_against_the_model_asked_for(env):
+    """Seen live: the tool loop's later requests were counted against the mod's
+    model (no saving shown) instead of the model asked for."""
+    client, settings, calls, state = env
+    interceptor.configure(settings, lambda body, ctx: {"model": "claude-haiku-4-5", "reason": "cheapest"})
+    sid = "s-loop-0123456789"
+    client.post("/api/route", json={"text": "read calc.py", "model": "claude-opus-5", "session_id": sid})
+    meta = {"metadata": {"user_id": f"user_x_account_y_session_{sid}"}}
+    client.post("/v1/messages", json={**turn("read calc.py", model="claude-haiku-4-5"), **meta}, headers=AUTH)
+    loop = turn([{"type": "tool_result", "tool_use_id": "t1", "content": "def add(a, b): ..."}], model="claude-haiku-4-5")
+    client.post("/v1/messages", json={**loop, **meta}, headers=AUTH)
+    first, second = records()[-2:]
+    assert first["reason"] == "routed in Claude Code: cheapest"
+    assert second["requested_model"] == "claude-opus-5" and second["routed_model"] == "claude-haiku-4-5"
+    assert second["cost_if_requested_usd"] > second["cost_usd"]
+    # the pane's view: one turn, both requests in it, on Haiku, cheaper than Opus
+    turns = client.get("/api/session-requests", params={"session_id": sid}).json()["turns"]
+    assert len(turns) == 1 and turns[0]["requests"] == 2 and turns[0]["models"] == ["claude-haiku-4-5"]
+    assert turns[0]["reason"] == "routed in Claude Code: cheapest" and turns[0]["saved_pct"] > 0
+    assert len(turns[0]["time"]) == 5  # HH:MM, local time
+
+
+def test_a_prefix_the_routed_model_held_but_did_not_read_is_not_credited_to_the_baseline(env):
+    """Seen live: a prefix 'shared' with an earlier request on the routed model
+    still had to be written in full there, yet the baseline priced it as read on
+    the model asked for (0.18 vs 0.012, shown as +1400%)."""
+    client, settings, calls, state = env
+    interceptor.configure(settings, lambda body, ctx: "claude-haiku-4-5")
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 20000}
+    client.post("/v1/messages", json=turn("first session"), headers=AUTH)
+    other = {**turn("second session"), "metadata": {"user_id": "user_x_account_y_session_another"}}
+    state["usage"] = {"input_tokens": 0, "output_tokens": 10, "cache_creation_input_tokens": 20000,
+                      "cache_read_input_tokens": 0}
+    client.post("/v1/messages", json=other, headers=AUTH)
+    rec = records()[-1]
+    assert rec["routed_model"] == "claude-haiku-4-5"
+    assert rec["cost_if_requested_usd"] > rec["cost_usd"]  # Opus writing 20k costs more than Haiku writing it
+
+
+def test_turn_smoothing_is_on_by_default_and_turning_it_off_warns(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    prefs = client.get("/api/preferences").json()
+    assert prefs["turn_smoothing"] is True and prefs["turn_smoothing_warning"] is None
+    off = client.post("/api/preferences", json={"turn_smoothing": False}).json()
+    assert off["turn_smoothing"] is False and "switch model back and forth" in off["turn_smoothing_warning"]
+    seen = []
+    interceptor.set_model_picker(lambda body, ctx: seen.append(ctx["turn_smoothing"]))
+    client.post("/v1/messages", json=turn("next"), headers=AUTH)
+    assert seen == [False]  # reaches the router
+    assert client.post("/api/preferences", json={"turn_smoothing": True}).json()["turn_smoothing_warning"] is None
+
+
+def test_a_request_the_mod_reports_is_priced_and_shows_in_its_session(env):
+    """A plugin-only session: Claude Code talks to Anthropic directly, so the
+    mod reports each request's usage and the gateway prices it as its own."""
+    client, settings, calls, _ = env
+    interceptor.configure(settings, None)
+    sid = "s-direct-0123456789"
+    usage = {"input_tokens": 5, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 20000}
+    same = client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5",
+                                                "routed_model": "claude-opus-5", "new_turn": True, **usage}).json()
+    assert same["cost_usd"] == pytest.approx(same["cost_if_requested_usd"])  # nothing rerouted: its own baseline
+    moved = client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5",
+                                                 "routed_model": "claude-haiku-4-5", "new_turn": True, **usage}).json()
+    # Opus held this loop's 20k-token prompt, so without the switch it would have read it
+    warm = {"input_tokens": 5, "output_tokens": 100, "cache_read_input_tokens": 20000, "cache_creation_input_tokens": 0}
+    assert moved["cost_if_requested_usd"] == pytest.approx(cost_usd(CLAUDE_PRICES["claude-opus-5"], warm))
+    assert moved["cost_usd"] == pytest.approx(cost_usd(CLAUDE_PRICES["claude-haiku-4-5"], usage))
+    assert calls["anthropic"] == []  # nothing was sent anywhere
+    data = client.get("/api/session-requests", params={"session_id": sid}).json()
+    assert data["requests"] == 2
+
+
+def test_mod_record_refuses_what_isnt_an_object(env):
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    assert client.post("/api/mod-record", json=[1, 2]).status_code == 400
+
+
+def test_the_mod_asks_the_router_knowing_which_model_holds_the_conversation(env):
+    """Seen live: the mod's route question carried only the prompt text, so the
+    router moved a 250k-token Opus conversation to Haiku (a full cache rewrite,
+    +267%) and back (+900%). It must see the session's model and prompt size."""
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx) or {"model": None, "reason": "kept"})
+    sid = "s-warm-0123456789"
+    usage = {"input_tokens": 2, "output_tokens": 50, "cache_read_input_tokens": 240000, "cache_creation_input_tokens": 9000}
+    client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5",
+                                         "routed_model": "claude-opus-5", "new_turn": True, **usage})
+    client.post("/api/route", json={"text": "rename this variable", "model": "claude-opus-5", "session_id": sid})
+    assert seen[-1]["last_model"] == "claude-opus-5" and seen[-1]["last_prompt_tokens"] == 249002
+    assert seen[-1]["est_prompt_tokens"] == 249002
+    # through the proxy the same: its main-loop requests are remembered for the mod
+    meta = {"metadata": {"user_id": "user_x_account_y_session_s-proxy-0123456789"}}
+    client.post("/v1/messages", json={**turn("first"), **meta}, headers=AUTH)
+    client.post("/api/route", json={"text": "next", "model": "claude-opus-5", "session_id": "s-proxy-0123456789"})
+    assert seen[-1]["last_model"] is not None and seen[-1]["last_prompt_tokens"]
+
+
+def _mod_session(client, sid, routed="claude-haiku-4-5"):
+    client.post("/api/mod-record", json={"session_id": sid, "requested_model": "claude-opus-5", "routed_model": routed,
+                                         "new_turn": True, "input_tokens": 5, "output_tokens": 50,
+                                         "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 100})
+
+
+def test_the_mod_route_keeps_the_proxys_rules(env):
+    """The rules the proxy applies to a turn apply when the mod asks too:
+    smoothing gets the last turn's quality, a correction holds the model asked
+    for, a model that failed in the session isn't picked, a pin must fit."""
+    client, settings, _, _ = env
+    seen = []
+
+    def picker(body, ctx):
+        seen.append(ctx)
+        return {"model": "claude-haiku-4-5", "reason": "cheapest", "model_quality": {"claude-haiku-4-5": 0.6}}
+    interceptor.configure(settings, picker)
+    sid = "s-rules-0123456789"
+    _mod_session(client, sid)
+    route = lambda text, **kw: client.post("/api/route", json={"text": text, "model": "claude-opus-5",  # noqa: E731
+                                                              "session_id": sid, **kw}).json()
+    route("rename this variable")
+    assert route("now the next one")["model"] == "claude-haiku-4-5"
+    assert seen[-1]["prev_quality"] == {"claude-haiku-4-5": 0.6}  # smoothing sees the last turn
+    assert seen[-1]["usage_profile"]  # this session's own token profile
+    # a correction after a rerouted answer: the model asked for, for the next turns too
+    calls = len(seen)
+    held = route("that's wrong, try again")
+    assert held["model"] == "claude-opus-5" and "after a correction" in held["reason"]
+    assert route("ok continue")["model"] == "claude-opus-5" and len(seen) == calls  # the router wasn't asked
+    # a model that failed in this session reaches the router as blocked
+    for _ in range(interceptor.CORRECTION_HOLD_TURNS):  # the hold runs out
+        route("next")
+    route("another", blocked=["claude-haiku-4-5"])
+    assert "after a correction" not in seen[-1].get("reason", "")
+    assert seen[-1]["blocked"] == {"claude-haiku-4-5": "failed earlier in this session"}
+    # a pinned model that can't take the conversation isn't used
+    client.post("/api/preferences", json={"mode": "pin", "pinned_model": "claude-haiku-4-5"})
+    settings["models"]["claude-haiku-4-5"]["context_window"] = 1000
+    pinned = route("anything")
+    assert pinned["model"] is None and "can't take this request" in pinned["reason"]
+
+
+def test_a_resumed_session_is_routed_against_the_model_first_asked_for(env):
+    """Seen live: after `claude -c` the session came back on the model the mod
+    had switched to (Sonnet), so Sonnet became 'asked': savings counted against
+    it and the router could never go back to Opus (pricier than asked)."""
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx["requested"]) or "claude-haiku-4-5")
+    sid = "s-resume-0123456789"
+    client.post("/api/route", json={"text": "rename x", "model": "claude-opus-5", "session_id": sid})
+    _mod_session(client, sid, routed="claude-haiku-4-5")
+    again = client.post("/api/route", json={"text": "next", "model": "claude-haiku-4-5", "session_id": sid,
+                                            "resumed": True}).json()
+    assert again["requested"] == "claude-opus-5" and seen[-1] == "claude-opus-5"
+
+
+def test_a_model_choice_of_the_model_already_routed_to_is_not_read_as_a_resume(env):
+    """A /model choice of the model the session is already routed to isn't a
+    resume: the person asked for that model, and it stays."""
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx["requested"]) or "claude-haiku-4-5")
+    sid = "s-model-0123456789"
+    client.post("/api/route", json={"text": "rename x", "model": "claude-opus-5", "session_id": sid})
+    _mod_session(client, sid, routed="claude-haiku-4-5")
+    chosen = client.post("/api/route", json={"text": "next", "model": "claude-haiku-4-5", "session_id": sid}).json()
+    assert chosen["requested"] == "claude-haiku-4-5" and seen[-1] == "claude-haiku-4-5"

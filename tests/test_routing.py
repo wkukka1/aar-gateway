@@ -257,6 +257,9 @@ def test_a_turns_prediction_is_blended_with_the_previous_turns(settings, router)
     settings["router"]["turn_smoothing"] = 1.0
     assert build_picker(settings, router_model=router)(BODY, ctx(prev_quality=first["model_quality"]))[
         "model_quality"] == alone["model_quality"]
+    # turned off in the dashboard: each message judged alone
+    off = pick(BODY, {**ctx(prev_quality=first["model_quality"]), "turn_smoothing": False})
+    assert off["model_quality"] == alone["model_quality"]
 
 
 def test_calibration_status_never_waits_for_the_picker_lock(settings, router, tmp_path):

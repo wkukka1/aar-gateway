@@ -7,6 +7,7 @@ name = "aar-gateway"
 version = "0.1.0"
 description = "Local gateway that routes Claude Code's requests to the cheapest model that can handle them"
 readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
@@ -22,6 +23,7 @@ dependencies = [
 dev = ["pytest"]
 
 [project.scripts]
+aptic = "aar_gateway.cli:main"
 aar-gateway = "aar_gateway.cli:main"
 aar-gateway-grade = "aar_gateway.grading.grade:main"
 aar-gateway-subagents = "aar_gateway.grading.subagent_baseline:main"

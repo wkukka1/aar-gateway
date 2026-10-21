@@ -276,7 +276,7 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
                 skipped[model] = reason
                 continue
             previous = (ctx.get("prev_quality") or {}).get(model)
-            if previous is not None and math.isfinite(previous):
+            if ctx.get("turn_smoothing", True) and previous is not None and math.isfinite(previous):
                 quality = smoothing * quality + (1.0 - smoothing) * float(previous)
             raw_quality[model] = quality
             profile = LLMProfile(name=model, provider=spec["lane"], model_id=model,

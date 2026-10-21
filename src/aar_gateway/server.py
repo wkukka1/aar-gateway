@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import interceptor, listen, share
@@ -182,6 +183,36 @@ async def _json_object(request: Request) -> dict:
     return body
 
 
+@app.post("/api/mod-record")
+async def mod_record(request: Request):
+    """A request the Claude Code mod saw that didn't come through this proxy:
+    its token usage, priced and logged like the proxy's own."""
+    body = await _json_object(request)
+    return await run_in_threadpool(interceptor.record_from_mod, body)
+
+
+@app.get("/api/session-requests")
+def session_requests(session_id: str = "", limit: int = 40):  # plain def: reads the log off the event loop
+    """One session's recent requests, for the Claude Code mod's pane."""
+    return interceptor.session_requests(session_id, limit)
+
+
+@app.post("/api/route")
+async def route(request: Request):
+    """Which model the router picks for a prompt, for the Claude Code mod
+    that switches models itself (``{"model": null}``: keep the one asked for)."""
+    body = await _json_object(request)
+    try:
+        est = int(body.get("est_prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        est = 0
+    blocked = body.get("blocked")
+    blocked = [str(m) for m in blocked][:20] if isinstance(blocked, list) else None
+    return await run_in_threadpool(interceptor.route_text, str(body.get("text") or ""),
+                                   str(body.get("model") or ""), str(body.get("session_id") or ""), est, blocked,
+                                   body.get("resumed") is True)
+
+
 @app.post("/api/subagent-spawn")
 async def subagent_spawn(request: Request):
     """Asked by the ``PreToolUse`` hook (``aar-gateway hook``) before Claude
@@ -202,6 +233,8 @@ async def update_preferences(request: Request):
     try:
         if "mode" in body:
             return interceptor.set_routing(body["mode"], body.get("pinned_model"))
+        if "turn_smoothing" in body:
+            return interceptor.set_turn_smoothing(bool(body["turn_smoothing"]))
         if "allow_upgrade" in body:
             return interceptor.set_allow_upgrade(bool(body["allow_upgrade"]))
         if "role" in body:

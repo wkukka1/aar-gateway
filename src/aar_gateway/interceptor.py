@@ -244,7 +244,8 @@ def _reset_state() -> None:
     """Every cache and running total the interceptor keeps, emptied: what
     :func:`configure` starts from (and what a test needs between cases)."""
     global _message_models_loaded
-    for state in (_sessions, _cc_sessions, _global_profile, _prefixes, _warm, _blocked, _spawns, _message_models):
+    for state in (_sessions, _cc_sessions, _global_profile, _prefixes, _warm, _blocked, _spawns, _message_models,
+                  _mod_loops, _mod_routes):
         state.clear()
     _message_models_loaded = False
     with _records_lock:
@@ -266,7 +267,8 @@ def configure(settings: dict, picker: ModelPicker | None, router_error: str | No
     if saved.get("quality_margin") is not None:
         _settings["router"]["margin"] = saved["quality_margin"]
     _settings["routing"] = {"mode": saved.get("mode", "auto"), "pinned_model": saved.get("pinned_model"),
-                            "allow_upgrade": bool(saved.get("allow_upgrade", False))}
+                            "allow_upgrade": bool(saved.get("allow_upgrade", False)),
+                            "turn_smoothing": bool(saved.get("turn_smoothing", True))}
     _config_roles.clear()
     _config_roles.update(_settings["subagents"].get("roles") or {})
     _settings["subagents"]["roles"] = {**_config_roles, **(saved.get("role_models") or {})}
@@ -291,6 +293,8 @@ def preferences() -> dict:
             "strongest_model": _settings.get("strongest"),
             "header": MARGIN_HEADER, "mode": routing["mode"], "pinned_model": routing["pinned_model"],
             "allow_upgrade": bool(routing.get("allow_upgrade")),
+            "turn_smoothing": bool(routing.get("turn_smoothing", True)),
+            "turn_smoothing_warning": None if routing.get("turn_smoothing", True) else TURN_SMOOTHING_WARNING,
             "models": list(_settings["models"]),
             # what the dropdowns show next to a model that isn't Claude
             "model_notes": {m: ("local" if "127.0.0.1" in (spec.get("base_url") or "") or "localhost" in
@@ -342,6 +346,21 @@ def set_routing(mode: str, pinned_model: str | None = None) -> dict:
     _settings["routing"] = {**before, "mode": mode, "pinned_model": pinned}
     _save_preferences(mode=mode, pinned_model=pinned)
     _log_override({"kind": "routing", "from": before, "to": _settings["routing"]})
+    return preferences()
+
+
+TURN_SMOOTHING_WARNING = ("Turn smoothing is off: each message is judged on its own, so a conversation can "
+                          "switch model back and forth between messages, and every switch makes the new model "
+                          "re-read the whole conversation into its cache (seen as +1200% requests).")
+
+
+def set_turn_smoothing(on: bool) -> dict:
+    """Whether each turn's prediction is blended with the previous turn's
+    (on by default: it stops a conversation flip-flopping between models)."""
+    before = dict(_settings.get("routing") or {})
+    _settings["routing"] = {**before, "turn_smoothing": bool(on)}
+    _save_preferences(turn_smoothing=bool(on))
+    _log_override({"kind": "turn_smoothing", "from": bool(before.get("turn_smoothing", True)), "to": bool(on)})
     return preferences()
 
 
@@ -714,7 +733,20 @@ class _Turn:
         if self.agent:
             asked = (_cc_sessions.get(self.claude_session) or {}).get("requested") or self.requested
         prev_tokens = self.session.get("prompt_tokens") or 0
-        baseline = _warm_usage(usage, max(prev_tokens, self.shared_before))
+        if canonical_model(self.target) == canonical_model(asked):
+            # served on the model asked for: what happened is the baseline, unless this
+            # request switched back after a reroute (the reroute cost that model its
+            # cache). Other conversations' prefixes don't count: a cache they warmed
+            # that this request still had to write was never shared.
+            previous = self.session.get("model")
+            warm = prev_tokens if previous and canonical_model(previous) != canonical_model(asked) else 0
+        else:
+            warm = max(prev_tokens, self.shared_before)
+            if canonical_model(self.target) in _warm_tokens(self.sig):
+                # the routed model held this prefix: what it actually read is how much was
+                # really shared, and the model asked for would have read no more
+                warm = min(warm, usage.get("cache_read_input_tokens") or 0)
+        baseline = _warm_usage(usage, warm)
         self._remember_served(status, usage, lane)
         cost = cost_usd(price_for(_settings, self.target), usage)
         cost_asked = cost_usd(price_for(_settings, asked), baseline)
@@ -743,6 +775,11 @@ class _Turn:
             _lru_set(_sessions, self.key, {"model": self.target, "prompt_tokens": tokens, "profile": profile,
                                            "agent": self.agent, "quality": quality, "hold": self.hold_left},
                      _MAX_SESSIONS)
+            if self.claude_session and self.agent is None and self.body.get("tools"):
+                # the session's main loop, for the mod's next routing question (route_text)
+                main = f"{self.claude_session[:12]}:main"
+                _lru_set(_mod_loops, main, {**(_mod_loops.get(main) or {}), "model": self.target,
+                                            "prompt_tokens": tokens, "profile": profile}, _MAX_SESSIONS)
             if self.body.get("tools"):
                 _global_profile.update(_update_profile(_global_profile, usage))
 
@@ -844,6 +881,14 @@ def _est_prompt_tokens(turn: _Turn) -> int:
 
 
 async def _decide(turn: _Turn) -> None:
+    mod_route = _mod_route_for(turn) if turn.agent is None else None
+    if mod_route:
+        # the mod switched this turn's model inside Claude Code: keep it on every
+        # request of the turn, and count savings against the model asked for
+        turn.target, turn.requested = turn.requested, mod_route["asked"]
+        turn.decision = {"reason": f"routed in Claude Code: {mod_route.get('reason') or 'router'}"
+                         if turn.human is not None else "same turn as the previous request"}
+        return
     previous = thread_previous(turn.body)
     if previous:
         # the API keeps this conversation server-side and this request only
@@ -900,6 +945,7 @@ async def _decide(turn: _Turn) -> None:
            "last_prompt_tokens": turn.session.get("prompt_tokens"),
            "quality_margin": _request_margin(turn.request),
            "allow_upgrade": bool(routing.get("allow_upgrade")),
+           "turn_smoothing": bool(routing.get("turn_smoothing", True)),
            "usage_profile": turn.session.get("profile") or dict(_global_profile) or None,
            "warm_tokens": _warm_tokens(turn.sig),
            "blocked": _blocked_for(turn)}
@@ -1016,7 +1062,7 @@ async def _via_anthropic_unguarded(turn: _Turn) -> Response:
         _remember_block(turn, upstream.status_code, detail)
         turn.error = f"{turn.target}: {error_summary(detail.encode())}"  # kept if the fallback succeeds
         turn.fall_back(upstream.status_code, detail)
-        upstream = await _send_anthropic(turn.request, "v1/messages", turn.raw)
+        upstream = await _send_anthropic(turn.request, "v1/messages", turn.body_for(turn.requested))
         if upstream.status_code == 400 and thread_previous(turn.body):
             upstream = await _find_thread_model(turn, upstream, tried={turn.attempted, turn.requested})
     elif upstream.status_code == 400 and thread_previous(turn.body):
@@ -1340,6 +1386,201 @@ def summarize_subagents(records: list[dict]) -> list[dict]:
     """One row per subagent role: spawns, the models that answered, plan usage against the
     session's own model, and how much of the prompt was read from cache."""
     return summarize(records)["subagents"]
+
+
+#: what the Claude Code mod chose for a session's turn (``/api/route``): the
+#: proxy keeps that model instead of routing the request again, and counts the
+#: saving against the model Claude Code asked for. Keyed by session id.
+_mod_routes: dict[str, dict] = {}
+MOD_ROUTE_SECONDS = 120.0
+
+
+def route_text(text: str, requested: str, session_id: str = "", est_prompt_tokens: int = 0,
+               blocked: list | None = None, resumed: bool = False) -> dict:
+    """The model the router picks for a prompt, for a caller that switches the
+    model itself (the Claude Code mod), under the proxy's rules (_decide): the
+    pinned model only when it fits, the correction hold, and the session's
+    conversation so far -- the model holding its cache and its length (seen
+    live: a 250k-token session moved to Haiku and back cost 10x what staying
+    on Opus would have), the last turn's quality for smoothing, and the
+    models that failed earlier in it. Never raises: ``{"model": None, ...}``
+    means keep the model asked for."""
+    routing = _settings.get("routing") or {}
+    key = f"{session_id[:12]}:main"
+    loop = dict(_mod_loops.get(key) or {})
+    if resumed and loop.get("asked") and requested == loop.get("model") and requested != loop["asked"]:
+        # `claude -c` restarts on the model the mod last switched to, which Claude Code
+        # recorded as the session's: the person asked for the one before. Only a session
+        # Claude Code reports as resumed, so a /model choice of that same model stays put.
+        requested = loop["asked"]
+    if session_id:
+        loop["asked"] = requested
+        _lru_set(_mod_loops, key, loop, _MAX_SESSIONS)
+    keep = {"model": None, "requested": requested}
+    est = max(est_prompt_tokens, loop.get("prompt_tokens") or 0)
+    failed = {str(m): "failed earlier in this session" for m in (blocked or [])}
+    body = {"model": requested, "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}]}
+    if routing.get("mode") == "off":
+        return {**keep, "reason": "routing off (dashboard)"}
+    if routing.get("mode") == "pin":
+        pinned = routing["pinned_model"]
+        why = unavailable_reason(pinned, body, _settings, failed, est)
+        pick = ({"model": None, "reason": f"pinned {pinned} can't take this request ({why})"} if why
+                else {"model": pinned, "reason": "pinned (dashboard)"})
+    elif text and is_correction(text) and loop.get("model") not in (None, requested) or loop.get("hold", 0) > 0:
+        # after "that's wrong" on a rerouted answer: the model asked for, for a few turns
+        hold = CORRECTION_HOLD_TURNS if is_correction(text) else loop["hold"]
+        _lru_set(_mod_loops, key, {**loop, "hold": hold - 1}, _MAX_SESSIONS)
+        pick = {"model": requested, "reason": "after a correction: staying on the model you asked for "
+                                              f"({hold - 1} more turn{'s' if hold - 1 != 1 else ''})"}
+    elif _picker is None or not text.strip():
+        return {**keep, "reason": "no router loaded" if _picker is None else "no prompt text"}
+    else:
+        ctx = {"requested": requested, "human_text": text, "est_prompt_tokens": est,
+               "last_model": loop.get("model"), "prev_quality": loop.get("quality"),
+               "last_prompt_tokens": loop.get("prompt_tokens"), "quality_margin": None,
+               "allow_upgrade": bool(routing.get("allow_upgrade")),
+               "usage_profile": loop.get("profile") or dict(_global_profile) or None,
+               "turn_smoothing": bool(routing.get("turn_smoothing", True)),
+               "warm_tokens": {}, "blocked": failed}
+        try:
+            picked = _picker(body, ctx)
+        except Exception as exc:  # noqa: BLE001 -- a router failure keeps the asked model
+            return {**keep, "reason": f"router error: {type(exc).__name__}"}
+        if isinstance(picked, str):
+            picked = {"model": picked, "reason": "picker"}
+        picked = picked or {}
+        if picked.get("model_quality"):
+            _lru_set(_mod_loops, key, {**loop, "quality": picked["model_quality"]}, _MAX_SESSIONS)
+        pick = {"model": picked.get("model"), "reason": picked.get("reason") or "router",
+                "predicted_quality": picked.get("predicted_quality")}
+    if pick["model"] and session_id:
+        _mod_routes[session_id[:12]] = {"asked": requested, "model": pick["model"], "at": time.monotonic(),
+                                        "reason": pick["reason"]}
+    return {**pick, "requested": requested}
+
+
+def _mod_route_for(turn: _Turn) -> dict | None:
+    """The mod's choice for this request's session, if it names this model and is
+    recent: the turn's first request or any later one (each use keeps it fresh,
+    so a long tool loop stays counted against the model asked for)."""
+    route = _mod_routes.get((turn.claude_session or "")[:12])
+    if route and route["model"] == turn.requested and time.monotonic() - route["at"] < MOD_ROUTE_SECONDS:
+        route["at"] = time.monotonic()
+        return route
+    return None
+
+
+#: per (session, loop): the model and prompt size of its previous reported request,
+#: for the baseline of the next (as the proxy keeps per conversation)
+_mod_loops: OrderedDict[str, dict] = OrderedDict()
+
+
+def _mod_reason(session: str, report: Mapping, routed: str, asked: str) -> str:
+    if report.get("agent_id") or not report.get("new_turn"):
+        return "same turn as the previous request"
+    route = _mod_routes.get(session)
+    return f"routed in Claude Code: {route.get('reason') or 'router'}" if route else (
+        "routed in Claude Code" if routed != asked else "as asked")
+
+
+def record_from_mod(report: Mapping) -> dict:
+    """Log a request the Claude Code mod saw but the proxy didn't (a session
+    that talks to Anthropic directly while the mod routes): priced the way the
+    proxy prices its own. The baseline is the model asked for, with this
+    loop's previous prompt in its cache when the previous request ran there."""
+    usage = {k: int(report.get(k) or 0) for k in
+             ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
+    asked, routed = str(report.get("requested_model") or ""), str(report.get("routed_model") or "")
+    session = str(report.get("session_id") or "")[:12]
+    loop_key = f"{session}:{report.get('agent_id') or 'main'}"
+    loop = _mod_loops.get(loop_key) or {}
+    if canonical_model(routed) == canonical_model(asked):
+        warm = loop.get("prompt_tokens", 0) if loop.get("model") and canonical_model(loop["model"]) != canonical_model(asked) else 0
+    else:
+        warm = loop.get("prompt_tokens", 0) if loop.get("model") and canonical_model(loop["model"]) == canonical_model(asked) else 0
+    baseline = _warm_usage(usage, warm)
+    _lru_set(_mod_loops, loop_key, {**loop, "model": routed, "prompt_tokens": prompt_tokens(usage),
+                                    "profile": _update_profile(loop.get("profile") or {}, usage)}, _MAX_SESSIONS)
+    _global_profile.update(_update_profile(_global_profile, usage))
+    strongest = _settings.get("strongest")
+    record = {
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "claude_session": session or None, "conversation": loop_key,
+        "new_turn": bool(report.get("new_turn")), "turn_trigger": None, "correction": False,
+        "subagent": bool(report.get("agent_id")), "agent_role": report.get("agent_role"), "role_source": "mod",
+        "baseline_model": None, "report_tokens": None,
+        "requested_model": asked, "routed_model": routed, "lane": "anthropic",
+        "reason": str(report.get("reason") or _mod_reason(session, report, routed, asked))[:120],
+        "fallback": False, "attempted_model": None, "error": None, "thread": None, "status": 200,
+        "latency_s": None, **usage,
+        "cost_usd": cost_usd(price_for(_settings, routed), usage),
+        "cost_if_requested_usd": cost_usd(price_for(_settings, asked), baseline),
+        "strongest_model": strongest, "cost_if_strongest_usd": cost_usd(price_for(_settings, strongest), baseline),
+        "predicted_quality": None, "best_predicted_quality": None, "candidates": None,
+        "quality_margin": None, "quality_source": "mod",
+    }
+    _append_record(record)
+    return {"logged": True, "cost_usd": record["cost_usd"], "cost_if_requested_usd": record["cost_if_requested_usd"]}
+
+
+def session_requests(session_id: str, limit: int = 40) -> dict:
+    """One Claude Code session's recent requests for the mod's pane: models,
+    why, cache use and cost against the model asked for. No prompt text."""
+    key = (session_id or "")[:12]
+    mine = [r for r in read_records() if key and r.get("claude_session") == key]
+    fields = ("ts", "requested_model", "routed_model", "reason", "status", "subagent", "agent_role",
+              "cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens", "output_tokens",
+              "cost_usd", "cost_if_requested_usd", "correction", "thread")
+    priced = [r for r in mine if r.get("cost_usd") is not None and r.get("cost_if_requested_usd")]
+    cost, base = sum(r["cost_usd"] for r in priced), sum(r["cost_if_requested_usd"] for r in priced)
+    return {"session": key, "requests": len(mine),
+            "saved_pct": round(100 * (1 - cost / base), 1) if base else None,
+            "recent": [{k: r.get(k) for k in fields} for r in mine[-max(1, min(limit, 200)):]],
+            "turns": session_turns(mine)[-max(1, min(limit, 200)):]}
+
+
+def session_turns(records: list[dict]) -> list[dict]:
+    """A session's requests grouped into the turns the person typed: a turn
+    starts with a main-loop request carrying new prompt text; its tool loop,
+    side requests and subagents join it. Times are this machine's local time."""
+    turns: list[dict] = []
+    for r in records:
+        side = str(r.get("reason") or "").startswith("side request")
+        if not turns or (r.get("new_turn") and not r.get("subagent") and not side):
+            try:
+                at = datetime.fromisoformat(r["ts"]).astimezone().strftime("%H:%M")
+            except (KeyError, TypeError, ValueError):
+                at = ""
+            turns.append({"time": at, "requested_model": r.get("requested_model"), "models": [],
+                          "reason": r.get("reason"), "requests": 0, "side_requests": 0, "errors": 0,
+                          "cache_read": 0, "cache_written": 0, "fresh": 0,
+                          "cost_usd": 0.0, "cost_if_requested_usd": 0.0, "subagents": []})
+        t = turns[-1]
+        t["errors"] += r.get("status") != 200
+        if r.get("cost_usd") is not None and r.get("cost_if_requested_usd"):
+            t["cost_usd"] += r["cost_usd"]
+            t["cost_if_requested_usd"] += r["cost_if_requested_usd"]
+        if r.get("subagent"):
+            role = r.get("agent_role") or "subagent"
+            sub = next((s for s in t["subagents"] if s["role"] == role and s["model"] == r.get("routed_model")), None)
+            if sub is None:
+                t["subagents"].append(sub := {"role": role, "model": r.get("routed_model"), "requests": 0})
+            sub["requests"] += 1
+        elif side:
+            t["side_requests"] += 1
+        else:
+            t["requests"] += 1
+            t["cache_read"] += r.get("cache_read_input_tokens") or 0
+            t["cache_written"] += r.get("cache_creation_input_tokens") or 0
+            t["fresh"] += r.get("input_tokens") or 0
+            if r.get("routed_model") and r["routed_model"] not in t["models"]:
+                t["models"].append(r["routed_model"])
+    for t in turns:
+        base = t["cost_if_requested_usd"]
+        t["saved_pct"] = round(100 * (1 - t["cost_usd"] / base)) if base else None
+    return turns
 
 
 def session_summary(session_id: str) -> dict:
