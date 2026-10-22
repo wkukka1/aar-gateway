@@ -292,7 +292,7 @@ def _status(as_json: bool = False) -> int:
     if health:
         router = health.get("router") or {}
         info["router"] = {"enabled": router.get("enabled"), "error": router.get("error"),
-                          "kind": router.get("kind")}
+                          "kind": router.get("kind"), "name": router.get("name")}
         stats = _get(url + "/stats", timeout=3) or {}
         totals = stats.get("totals") or {}
         info["requests"] = totals.get("requests")
@@ -313,7 +313,7 @@ def _status(as_json: bool = False) -> int:
         print("  start it with  aar-gateway start")
         return 1
     router = info["router"]
-    state = ("on" if router["enabled"] else f"FAILED TO LOAD -- {router['error']}" if router["error"]
+    state = (f"on ({router['name'] or router['kind']})" if router["enabled"] else f"FAILED TO LOAD -- {router['error']}" if router["error"]
              else "off (enable it in the config)")
     saved = info.get("plan_usage_saved")
     print(f"● running        {url}" + (f"  (pid {pid}, since {info.get('up_since')})" if pid else ""))
@@ -523,6 +523,96 @@ def _fetch_router(source: str, target: Path) -> dict:
     return header
 
 
+# --------------------------------------------------------------------------- #
+# router: the router files on this machine, and which one the gateway serves  #
+# --------------------------------------------------------------------------- #
+def _router_files() -> dict[str, Path]:
+    """Every router file ``router use`` can pick, by name (file stem): the
+    package's own, then ``~/.aar-gateway/routers/`` (a same-named one there wins)."""
+    from .config import routers_dir
+
+    files = {p.stem: p for p in sorted(BUNDLED_ROUTER.parent.glob("*.npz"))}
+    files.update({p.stem: p for p in sorted(routers_dir().glob("*.npz"))})
+    return files
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _router(argv: list[str]) -> int:
+    """``aar-gateway router [list|add|use]``: switch the router the gateway serves.
+    ``use`` copies a file over ``~/.aar-gateway/router.npz``; the config is never edited."""
+    from ._core.artifacts import load_router_file
+    from .config import routers_dir
+
+    action = argv[0] if argv else "list"
+    active_file = _home() / "router.npz"
+    if action == "list":
+        active = _sha256(active_file) if active_file.exists() else None
+        rows = []
+        for name, path in _router_files().items():
+            row = {"name": name, "source": "bundled" if path.parent == BUNDLED_ROUTER.parent else "added",
+                   "path": str(path), "active": active is not None and _sha256(path) == active}
+            try:
+                payload, header = load_router_file(path)
+                row.update(kind=header.get("format"), id=header.get("artifact_id"),
+                           models=len(payload.model_ids), dataset=header.get("dataset") or None)
+            except Exception as exc:  # noqa: BLE001 -- list a broken file, don't crash on it
+                row["error"] = str(exc)
+            rows.append(row)
+        if "--json" in argv[1:]:
+            print(json.dumps(rows, indent=2))
+            return 0
+        for r in rows:
+            what = (f"BROKEN: {r['error']}" if "error" in r else
+                    f"{r['kind']:<4} {r['models']} models" + (f", {r['dataset']}" if r["dataset"] else "")
+                    + (f"  ({r['id']})" if r["id"] else ""))
+            print(f"{'*' if r['active'] else ' '} {r['name']:<26} {r['source']:<8} {what}")
+        if active is None:
+            print(f"\nno router installed at {active_file}")
+        elif not any(r["active"] for r in rows):
+            print(f"\n{active_file} holds a router that isn't listed here")
+        print("\n* = the one the gateway serves.  switch: aar-gateway router use <name>")
+        return 0
+    if action == "add":
+        if len(argv) < 2:
+            raise SystemExit("usage: aar-gateway router add <file or URL> [--name NAME]")
+        source = argv[1]
+        name = argv[argv.index("--name") + 1] if "--name" in argv[2:-1] else \
+            Path(source.split("?")[0].rstrip("/")).stem
+        if not re.fullmatch(r"[\w.-]+", name):
+            raise SystemExit(f"{name!r} isn't a usable router name (letters, digits, '.', '-', '_')")
+        routers_dir().mkdir(parents=True, exist_ok=True)
+        _fetch_router(source, routers_dir() / f"{name}.npz")
+        print(f"use it: aar-gateway router use {name}")
+        return 0
+    if action == "use":
+        files = _router_files()
+        if len(argv) < 2 or argv[1] not in files:
+            known = ", ".join(files) or "none"
+            raise SystemExit((f"no router named {argv[1]!r}. " if len(argv) > 1 else
+                              "usage: aar-gateway router use <name>. ") + f"Routers: {known}")
+        _home().mkdir(parents=True, exist_ok=True)
+        _fetch_router(str(files[argv[1]]), active_file)
+        from .config import load_settings
+
+        try:
+            artifact = (load_settings(_config_path()) or {}).get("router", {}).get("artifact")
+        except Exception:  # noqa: BLE001 -- doctor reports a broken config
+            artifact = None
+        if not artifact or Path(artifact).expanduser().resolve() != active_file.resolve():
+            print(f"note: the config's router.artifact is {artifact or 'unset'}, not {active_file}, so the\n"
+                  f"gateway won't serve this until it points there (`aar-gateway setup --force` writes that)")
+        if _healthy(_base_url()):
+            _restart()
+            print("restarted the gateway")
+        return 0
+    raise SystemExit("usage: aar-gateway router [list [--json] | add <file or URL> [--name NAME] | use <name>]")
+
+
 def _setup(router: str | None, force: bool, enable: bool | None = False, share: bool | None = False,
            mod: bool | None = None) -> int:
     """Everything a new user needs: the router file and a config that uses it."""
@@ -631,7 +721,7 @@ def _doctor(as_json: bool = False) -> int:
     if health:
         router = health.get("router") or {}
         if router.get("enabled"):
-            report(True, "router", f"{router.get('kind')} loaded from {router.get('source')}")
+            report(True, "router", f"{router.get('name') or router.get('kind')} loaded from {router.get('source')}")
         elif router.get("error"):
             report(False, "router", router["error"],
                    "check router.artifact in the config points at a router file (`aar-gateway setup` installs one), then `aar-gateway restart`")
@@ -1494,6 +1584,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if argv[:1] == ["local"]:
         return _local(argv[1:])
+    if argv[:1] == ["router"]:
+        return _router(argv[1:])
     if argv[:1] == ["share"]:
         return _share(argv[1:])
     if argv[:1] == ["view"]:
@@ -1537,6 +1629,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor_p.add_argument("--json", action="store_true", help="the checks as JSON (for scripts and the ops agent)")
     sub.add_parser("stats", help="the gateway's totals as JSON (savings, requests, errors)")
     sub.add_parser("local", help="optional local models via Ollama: local [add|remove] <model>")
+    sub.add_parser("router", help="switch the router: router [list|add <file or URL>|use <name>]")
     sub.add_parser("share", help="opt-in anonymous usage sharing: share [on|off|status|show|delete|token|upload]")
     sub.add_parser("view", help="read-only dashboard for your phone over Tailscale: view [--host ADDRESS]")
     sub.add_parser("config", help="which config file is in use")

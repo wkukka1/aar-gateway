@@ -74,6 +74,39 @@ aar-gateway setup --router router-llmrouterbench.npz
 it loads, and writes `interceptor.router.artifact` into a new config. In any
 config, `router.artifact` takes precedence over `data_config`.
 
+**A trained NIRT, as a router file** (`--kind nirt`). The package also ships
+`routers/llmrouterbench-nirt.npz`, the NIRT run `lrb-nirt-projected` (13 models, 0.1 MB).
+With the pool fixed, a NIRT whose query head is `Linear → ReLU → Linear` scores
+`a_m · θ(e) − b_m`, and that is exactly the same MLP (`w2 = A·W2`, `b2 = A·b2 − B`,
+with `A, B` the pool's per-model parameters). So it is saved in the `mlp` format and served
+the same way, with no PyTorch. The exporter refuses anything that doesn't fold this way:
+an interaction term, per-query difficulty, vector difficulty, batch-norm, a deeper or
+linear query head, `free` model parameters, IRT-Router orientation, query features, or the
+ZOIB/`BaselineNIRT` runs. It then checks the file against the run's own scores, both in memory and
+after reloading through this package's loader (`lrb-nirt-projected`: max |ΔP| 1.8e-7 on
+500 test prompts).
+
+```bash
+python scripts/routing/export_router.py --config configs/llmrouterbench.yaml     --kind nirt --run lrb-nirt-projected --dataset llmrouterbench     --out aar-gateway/src/aar_gateway/routers/llmrouterbench-nirt.npz
+```
+
+### Switching routers
+
+`aar-gateway router` swaps the file the gateway serves. It never edits the config:
+`router.artifact` keeps pointing at `~/.aar-gateway/router.npz`, and `use` replaces that
+file (load-checked, atomically) and restarts a running gateway.
+
+```bash
+aar-gateway router list                  # bundled + added files; * marks the one served
+aar-gateway router use llmrouterbench-nirt
+aar-gateway router use llmrouterbench-mlp          # back to the default
+aar-gateway router add my-router.npz [--name NAME] # into ~/.aar-gateway/routers/
+```
+
+Added files live in `~/.aar-gateway/routers/`, and a name there wins over a bundled one.
+(`~/.aar-gateway/models/` is the text encoder's cache.) `status`, `doctor` and `/health`
+name the router by its file's `artifact_id`, e.g. `nirt-lrb-nirt-projected`.
+
 ## Managing the gateway
 
 | Command | What it does |
@@ -86,6 +119,7 @@ config, `router.artifact` takes precedence over `data_config`.
 | `aar-gateway doctor` | checks Claude Code, the config, the router, the port and the log folder, with a fix for each problem |
 | `aar-gateway config` | which config file is in use |
 | `aar-gateway setup [--router FILE\|URL] [--force]` | install the router file and write a config (existing configs are kept without `--force`) |
+| `aar-gateway router [list\|use NAME\|add FILE\|URL]` | list the router files, switch the one served, or add your own ([Switching routers](#switching-routers)) |
 | `aar-gateway service install` / `uninstall` / `status` | start at login: a LaunchAgent on macOS, a systemd user unit on Linux; restarted if it crashes, not after `stop` |
 | `aar-gateway serve` | the gateway in the foreground |
 | `aar-gateway view [--host ADDRESS] [--port N]` | a read-only copy of the dashboard on another address (your Tailscale IPv4 by default, port 8788), for checking from a phone |
@@ -123,8 +157,8 @@ compaction on every turn.
 an iCloud-synced folder (`~/Documents`, `~/Desktop`). macOS keeps marking its
 `.pth` files hidden, and Python 3.13+ skips hidden `.pth` files. Either put
 the venv outside iCloud (`python3 -m venv ~/.venvs/aar`) or
-`export PYTHONPATH=$PWD/src`. Run from the repo root: the router loads its
-trained run from `data/processed/nirt_runs/` (or set `interceptor.router.runs_dir`).
+`export PYTHONPATH=$PWD/src`. The router itself is the `.npz` file `router.artifact` names,
+not a training run, so the gateway needs nothing from the training repo.
 
 ## Check it works
 
@@ -260,6 +294,68 @@ Three ways to set it:
 ```bash
 ANTHROPIC_CUSTOM_HEADERS="x-aar-quality-margin: 0.1" claude
 ```
+
+### Cost weight (λ) instead of the margin
+
+λ is a second way to state the same preference. With λ set, the gateway takes the
+model with the best predicted quality minus λ times its cost **relative to the
+dearest eligible model for this request**:
+
+    u(model) = predicted quality − λ × estimated cost / estimated cost of the dearest eligible model
+
+Because the cost is relative, one λ means the same on a short request and a
+200k-token one: λ 0.1 means "give up at most 0.1 predicted quality to go from
+the dearest model's price to free". λ 0 always takes the top prediction; λ 1
+almost always takes the cheapest model. While λ is set the margin is not used;
+switching λ off (`null`) brings the margin back. The switch-margin stickiness
+for upgrades applies either way.
+
+Set it from the dashboard (Advanced settings → Cost weight), with
+`POST /api/preferences` sending `{"cost_weight": 0.05}`, `{"cost_preset": "balanced"}`
+or `{"cost_weight": null}` to switch it off, or for one session:
+
+```bash
+ANTHROPIC_CUSTOM_HEADERS="x-aar-cost-weight: 0.05" claude    # "off" = use the margin
+```
+
+The λ presets are calibrated for the router file `manifold-nirt-claude-judged`
+(below), out-of-fold on 99 LLM-judged mid-conversation turns, folds by
+conversation, against always using Opus (quality 0.711):
+
+| Preset | λ | Quality | Saved vs Opus | vs mix |
+|---|---|---|---|---|
+| `quality` | 0.02 | 0.706 | 24% | +0.009 |
+| `balanced` | 0.2 | 0.665 | 72% | +0.061 |
+| `save_more` | 0.3 | 0.657 | 76% | +0.073 |
+
+λ between 0.03 and 0.1 sits on or below the mix line with this file (it moves
+turns Opus → Sonnet without picking the right ones); skip that range. On a prompt
+source the file never trained on, `save_more` measured +0.029 vs mix at 73% saved
+(−0.081 quality), and on a separately graded 65-prompt pool the file did not beat
+the mix line: the presets transfer to traffic like the judged turns, not to all
+traffic. With another router file, re-measure before trusting them.
+
+### The judged manifold router (`manifold-nirt-claude-judged`)
+
+A profile-manifold NIRT (`investigations/profile_manifold/`) fine-tuned on the
+99 judged turns (`scripts/routing/export_judged_router.py`: three seeds, every
+weight at lr 1e-3 plus per-tier offsets, folded over the tiers' own profiles,
+their logits averaged into one `mlp` file). It encodes prompts with raw BERT,
+which fastembed doesn't ship: export the encoder once with
+`python scripts/routing/export_bert_encoder.py` (writes
+`~/.aar-gateway/encoders/bert-base-uncased-mean`, 436 MB; checked against the
+training encoder to 2e-6). Without that folder the router fails to load and the
+gateway forwards requests unrouted, as for any router error.
+
+### Router files that score the tiers directly
+
+The shipped files predict quality for benchmark models and read each tier
+through its `proxy`. A file whose columns are the tier ids themselves (exported
+with `scripts/routing/export_router.py --kind nirt --pool
+claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5`, which scores each tier from
+its own profile in `configs/model_profiles.yaml`) is read directly: a tier whose
+proxy is not in the file but whose own id is uses its own column, with no config
+change. The decision log then shows `quality_source: router scores the models directly`.
 
 ## Dashboard
 
@@ -579,6 +675,88 @@ Known limits:
 * The judge is a Claude model, so a family preference is possible.
   Anonymising and shuffling limit that; they don't remove it.
 
+### Turns from the middle of a conversation
+
+The pool above is mostly first messages. Real turns usually come later in a
+conversation, after "now do X" or "that didn't work". So a second pool,
+built 2026-10-21, takes 100 turns that each have at least one earlier human
+message. There are 25 from each source:
+
+* the user's own Claude Code sessions;
+* [SWE-chat](https://huggingface.co/datasets/SALT-NLP/SWE-chat): other
+  developers' Claude Code sessions;
+* [ConvCodeBench](https://huggingface.co/datasets/ConvCodeWorld/convcodebench):
+  a coding task, the model's failed attempt, then the test output and a
+  reviewer's notes;
+* [WildChat](https://huggingface.co/datasets/allenai/WildChat-1M): English
+  coding chats with ChatGPT.
+
+How a turn is answered and graded:
+
+* The turn is the last few exchanges (text only, up to 3,000 characters)
+  followed by the message.
+* Each tier answers the whole turn. The router sees only the message, as the
+  live gateway does (`human_text`).
+* Sonnet 5.5 judges, not Opus, to save tokens, so the scores are a little
+  off the 200-prompt pool's. Compare the savings and vs mix columns, which
+  depend on the gaps between models, not the absolute scores.
+* Two windows of plan usage graded 99 of the 100 turns: $30 of
+  API-equivalent answers, plus the judge calls, which aren't metered.
+
+Build the pool with `python -m evaluation.gateway.multiturn
+{own,swe-chat,convcode,wildchat} --n 25`, then grade with `aar-gateway-grade
+--turns … --out … --judge claude-sonnet-5-5`.
+
+| Policy (99 turns) | Quality | vs mix | Below Opus |
+|---|---|---|---|
+| Always Opus | 0.711 | — | 0% |
+| Always Sonnet | 0.678 | — | 56% |
+| Today's router | 0.702 | +0.005 | 23% |
+| Pool kNN (leave-one-out) | 0.705 | +0.016 | 38% |
+| Oracle | 0.760 | +0.073 | 42% |
+
+| Source | Router: quality (Opus) | Router: below Opus | Router: vs mix | Oracle: below Opus |
+|---|---|---|---|---|
+| Own sessions | 0.633 (0.658) | 19% | +0.016 | 27% |
+| SWE-chat | 0.640 (0.668) | 16% | −0.018 | 57% |
+| ConvCodeBench | 0.784 (0.740) | 64% | +0.033 | 69% |
+| WildChat | 0.748 (0.776) | 11% | −0.015 | 46% |
+
+What the second pool shows:
+
+* **The same as single prompts.** Today's router sits on the mix line
+  (+0.005) and saves about a quarter of Opus usage. The oracle shows about
+  twice that saving is there to find.
+* **Fixing after failed tests suits Sonnet.** On ConvCodeBench, Sonnet
+  outscores Opus (0.83 vs 0.74), and the router's mostly-Sonnet picks keep
+  Opus quality at a third of its usage.
+* **Mid-conversation follow-ups.** On these (own sessions, SWE-chat,
+  WildChat) the router sends roughly three in four turns to Opus. A message
+  like "did you test it?" says little about the work by itself, which is why
+  routing on the kind of work and on session signals is the next step, not a
+  better prompt reader.
+* **Noise.** 25 turns per source leaves about ±0.03 of noise on the per-source
+  vs mix figures.
+
+The installed routers on the same 99 turns. As in [Measured against
+installed routers](#measured-against-installed-routers), every router got a
+stub instead of a real model, so this cost $0. Each request carried the whole
+turn as one message, so here the live gateway also saw the earlier
+conversation:
+
+| Router | Quality | vs mix | Below Opus | H/S/O |
+|---|---|---|---|---|
+| aar-gateway MLP (live default) | 0.712 | +0.010 | 15% | 4/28/67 |
+| aar-gateway NIRT | 0.711 | +0.000 | 0% | 0/0/99 |
+| LiteLLM complexity router | 0.678 | −0.002 | 54% | 2/92/5 |
+| claude-code-router, claude-code-proxy, RouteLLM | ≈0.711 | ≈0 | ≈0% | (almost) all Opus |
+
+No router beats the mix line by more than the noise. LiteLLM's saving is
+what always-Sonnet gives (56% below Opus, quality 0.678). The NIRT router
+sent every turn to Opus, and both aar routers failed the "lookup and design
+get different tiers" activation check in this run. Run report:
+`~/.aar-router-bench/results/20261021-225549/`.
+
 ## Subagents
 
 Claude Code's subagents (Agent tool spawns) each run in a fresh context and
@@ -732,6 +910,100 @@ as CCR does). For the rest, the trained router replaces the rules:
   sees.
 * **Background requests** stay on the model Claude Code asked for: they are
   ~1k tokens, and some models reject their settings.
+
+### Measured against installed routers
+
+[`evaluation/gateway/router_compare.py`](../../src/evaluation/gateway/router_compare.py)
+runs real routers, each installed in its own environment
+([`scripts/router_bench/install.ps1`](../../scripts/router_bench/install.ps1)), with
+their upstream pointed at a local stub. Every graded prompt goes through each router
+as a Claude Code turn. The stub records which tier the router forwarded to, and that
+tier's graded score and usage are what the decision is worth. This compares routing
+policies: it spends nothing, and it never judges the stub's canned answers.
+
+```bash
+python -m evaluation.gateway.router_compare capture   # one `claude -p "hi"`, to the stub only
+python -m evaluation.gateway.router_compare run --graded ~/.aar-gateway/eval-rules/graded.jsonl \
+    --graded ~/.aar-gateway/eval40/graded.jsonl --sensitivity --smoke
+```
+
+On 65 graded prompts, with the request asking for Opus (Claude Code's main loop),
+2026-10-20:
+
+| Router | Quality | vs mix | Matches best | Est. usage | Saved vs no router [95% CI] | H/S/O |
+|---|---|---|---|---|---|---|
+| aar-gateway, MLP router (live default, no own grades) | 0.706 | +0.011 | 74% | $54.66 | $2.98, 5% [−0.14, 8.30] | 3/6/56 |
+| aar-gateway, NIRT router (`llmrouterbench-nirt`) | 0.703 | 0 | 72% | $57.64 | $0, 0% | 0/0/65 |
+| claude-code-router 1.0.73 | 0.703 | 0 | 72% | $57.64 | $0, 0% | 0/0/65 |
+| claude-code-proxy | 0.703 | 0 | 72% | $57.64 | $0, 0% | 0/0/65 |
+| LiteLLM 1.106.1 complexity router | 0.662 | +0.005 | 49% | $33.34 | $24.30, 42% [17.08, 32.28] | 15/46/4 |
+| LiteLLM auto-router (our tier utterances) | 0.678 | −0.002 | 63% | $48.70 | $8.94, 16% [5.01, 13.87] | 4/21/40 |
+| RouteLLM 0.2.0 bert, Opus/Haiku | 0.703 | 0 | 72% | $57.64 | $0, 0% | 0/0/65 |
+| oracle (ceiling, not a router) | 0.748 | +0.091 | 100% | $34.17 | $23.47, 41% | 31/15/19 |
+
+"No router" is every prompt on the model Claude Code asked for (the gateway's
+`vs_no_router`). The run reports it for every requested model: asked for Sonnet, the MLP
+router saves 82% and the NIRT router 83% (both send nearly everything to Haiku, ΔQ −0.015,
+CI includes 0). claude-code-router then costs 41% *more* than no router, because its `think`
+rule upgrades to Opus.
+
+**The NIRT router never leaves Opus at the default margin.** `router.margin` is the
+gateway's cost aversion, and NIRT's smallest predicted Opus-over-Haiku gap on these prompts is
+0.071, above the default 0.05. `--margins 0,0.05,0.1,0.15,...` sweeps it live through each
+gateway's `x-aar-quality-margin` override. NIRT saves 15% at 0.125 (+0.011 vs mix) and 54% at
+0.15 (ΔQ −0.032 [−0.060, −0.005], +0.017 vs mix, the most above the mix line of any router
+here). Picking the margin on a random half of the prompts and scoring it on the other half
+(200 splits), NIRT holds +0.010 vs mix, saving 40% at ΔQ −0.026, and picks 0.125–0.15 in 95%
+of splits; MLP holds 0.000, saving 28%. A margin near 0.15 for the NIRT file is worth testing on
+fresh graded data before it becomes the default. NIRT never picks Sonnet.
+
+* **No router predicts which prompts can go cheaper.** Every row sits within ±0.013 of the
+  random-mix line. The oracle is +0.09 above it.
+* **aar-gateway (MLP) vs CCR: no detectable difference.** Paired bootstrap 95% CI: quality
+  −0.003 [−0.012, +0.006], usage +$2.98 [−0.14, +8.30].
+* **LiteLLM's complexity router saves the most, and pays for it in quality.** Usage is
+  −$21 [−30, −14] vs aar and quality −0.045 [−0.080, −0.009]. That puts it on the mix line:
+  it costs the same as randomly mixing Haiku and Sonnet.
+* **CCR on today's Claude Code is always Opus.** Claude Code sends `thinking` on every
+  main-loop turn, so the `think` rule fires every time. Without `thinking`, it is always
+  Sonnet (`default`). All four of its rules activate as documented.
+* **claude-code-proxy is a name mapper, not a router.** haiku→SMALL, sonnet→BIG, anything
+  else passes through. It also rejects current Claude Code requests (HTTP 422 on the
+  trailing `system` message), so `claude -p` through it fails.
+* **RouteLLM's Arena calibration doesn't transfer to coding prompts.** The threshold
+  calibrated for aar's 86% Opus share sends 100%, and one calibrated for 10% sends 26%. No
+  point on its cost/quality curve is more than +0.013 above the mix line.
+* **LiteLLM's auto-router changes with the request shape.** It embeds the whole last user
+  message, so Claude Code's `<system-reminder>` blocks make it look simple, and it sends 62
+  of 65 prompts to Haiku in the Claude Code track, against 4 in the plain-API track.
+* **aar-gateway honours the requested ceiling, and that dominates.** Asked for Sonnet, it
+  sends 64 of 65 prompts to Haiku: the predicted gap between Haiku and Sonnet is within
+  the 0.05 margin.
+
+**The ZOIB router, if it were integrated.** The ZOIB run (`lrb-zoib-projected`: 8-d,
+interaction term, taxonomy relevance) doesn't fold into the `mlp` router file, so it can't run
+behind the gateway yet. [`evaluation/gateway/zoib_replay.py`](../../src/evaluation/gateway/zoib_replay.py)
+replays it the way the gateway would: text → MiniLM → relevance from the 41 cluster centroids →
+ZOIB expected score → the tiers' stand-ins → the margin rule. From raw text it reproduces the
+run's own predictions to 7e-7 on 300 held-out queries, and the MLP and NIRT files replayed the
+same way give exactly the live gateways' picks. Asked for Opus:
+
+| Margin | ZOIB saved | ZOIB ΔQ vs Opus [95% CI] | ZOIB vs mix | NIRT saved | MLP saved |
+|---|---|---|---|---|---|
+| 0.05 (default) | 0% | −0.002 | −0.001 | 0% | 5% |
+| 0.075 | 15% | −0.009 [−0.022, +0.002] | +0.013 | 0% | 16% |
+| 0.10 | 34% | −0.023 [−0.045, −0.000] | +0.021 | 4% | 34% |
+| 0.125 | 56% | −0.038 [−0.071, −0.005] | +0.012 | 15% | 54% |
+| 0.15 | 75% | −0.063 [−0.098, −0.026] | −0.008 | 54% | 79% |
+
+Margin chosen on one half of the prompts and scored on the other (200 splits): ZOIB +0.008 vs mix,
+33% saved, ΔQ −0.026 (it chooses 0.075–0.125); NIRT +0.010, 40%; MLP 0.000, 28%. ZOIB and NIRT
+are both a little above the mix line once the margin is wider, and can't be told apart on 65
+prompts. Like NIRT, ZOIB never picks Sonnet.
+
+Caveats: 65 prompts, so quality gaps under ~0.03 are noise. The usage figures are what the
+grading replays metered, at API prices. Every router saw a cold cache. aar-gateway's
+`/health` reported the shipped router loaded with 0 graded prompts of its own.
 
 ## Not done yet
 

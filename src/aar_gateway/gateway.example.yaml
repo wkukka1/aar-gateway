@@ -40,6 +40,11 @@ interceptor:
     # from the dashboard (saved in ~/.aar-gateway/preferences.json), or per
     # Claude Code session: ANTHROPIC_CUSTOM_HEADERS="x-aar-quality-margin: 0.08"
     margin: 0.05
+    # Cost weight lambda on RELATIVE cost (u = quality - lambda * cost / dearest
+    # eligible model's cost). null = off, the margin applies; when set it replaces
+    # the margin. Live from the dashboard, or per session:
+    # ANTHROPIC_CUSTOM_HEADERS="x-aar-cost-weight: 0.05" ("off" = margin).
+    cost_weight: null
     expected_output_tokens: 800   # output-length prior for cost estimates
     cache_ttl: 1h                 # Claude Code writes 1-hour cache entries
     # A switch to another model rewrites the ~200k-token prompt cache once;

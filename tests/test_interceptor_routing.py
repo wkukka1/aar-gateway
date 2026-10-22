@@ -795,3 +795,41 @@ def test_a_model_choice_of_the_model_already_routed_to_is_not_read_as_a_resume(e
     _mod_session(client, sid, routed="claude-haiku-4-5")
     chosen = client.post("/api/route", json={"text": "next", "model": "claude-haiku-4-5", "session_id": sid}).json()
     assert chosen["requested"] == "claude-haiku-4-5" and seen[-1] == "claude-haiku-4-5"
+
+
+def test_lambda_is_saved_overridden_per_request_and_switched_off(env, tmp_path):
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx["cost_weight"]))
+    assert client.get("/api/preferences").json()["cost_weight"] is None
+    assert client.post("/api/preferences", json={"cost_weight": 0.1}).json()["cost_weight"] == 0.1
+    assert json.loads((tmp_path / "preferences.json").read_text())["cost_weight"] == 0.1
+    client.post("/v1/messages", json=turn("a"), headers=AUTH)
+    client.post("/v1/messages", json=turn("b"), headers={**AUTH, interceptor.COST_WEIGHT_HEADER: "0.3"})
+    client.post("/v1/messages", json=turn("c"), headers={**AUTH, interceptor.COST_WEIGHT_HEADER: "off"})
+    assert seen == [0.1, 0.3, None]
+    balanced = interceptor.COST_PRESETS["balanced"]
+    assert client.post("/api/preferences", json={"cost_preset": "balanced"}).json()["cost_weight"] == balanced
+    assert client.post("/api/preferences", json={"cost_weight": None}).json()["cost_weight"] is None
+    assert json.loads((tmp_path / "preferences.json").read_text())["cost_weight"] is None
+    assert client.post("/api/preferences", json={"cost_weight": 2}).status_code == 400
+    assert client.post("/api/preferences", json={"cost_preset": "nope"}).status_code == 400
+
+
+def test_a_saved_lambda_survives_a_restart(env, tmp_path):
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    client.post("/api/preferences", json={"cost_weight": 0.07})
+    settings["router"]["cost_weight"] = None
+    interceptor.configure(settings, None)
+    assert interceptor.preferences()["cost_weight"] == 0.07
+
+
+def test_a_nan_lambda_header_falls_back_to_the_saved_value(env):
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx["cost_weight"]))
+    client.post("/api/preferences", json={"cost_weight": 0.1})
+    client.post("/v1/messages", json=turn("a"), headers={**AUTH, interceptor.COST_WEIGHT_HEADER: "nan"})
+    client.post("/v1/messages", json=turn("b"), headers={**AUTH, interceptor.COST_WEIGHT_HEADER: "inf"})
+    assert seen == [0.1, 0.1]

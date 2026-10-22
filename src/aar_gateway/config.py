@@ -38,7 +38,7 @@ DEFAULT_MODELS: dict[str, dict] = {
     "claude-haiku-4-5": {"lane": "anthropic", "proxy": "gemini-2.5-flash", "context_window": 200_000,
                          "rejects": ["effort"]},
 }
-DEFAULT_ROUTER = {"enabled": False, "artifact": None, "margin": 0.05,
+DEFAULT_ROUTER = {"enabled": False, "artifact": None, "margin": 0.05, "cost_weight": None,
                   "expected_output_tokens": 800, "cache_ttl": "1h", "horizon_requests": 20,
                   "switch_margin": 0.05, "turn_smoothing": 0.5}
 #: Claude Code subagents (``aar_gateway.subagents``): ``roles`` maps a role
@@ -77,6 +77,17 @@ def overrides_path() -> Path:
 def models_dir() -> Path:
     """Where the router's text encoder is cached."""
     return gateway_home() / "models"
+
+
+def encoders_dir() -> Path:
+    """Local ONNX text encoders a router file names by folder (``encoder.model_path``),
+    e.g. the BERT encoder of a NIRT file; fastembed's own downloads stay in ``models``."""
+    return gateway_home() / "encoders"
+
+
+def routers_dir() -> Path:
+    """Router files added with ``aar-gateway router add`` (``router use`` picks one)."""
+    return gateway_home() / "routers"
 
 
 def graded_path() -> Path:

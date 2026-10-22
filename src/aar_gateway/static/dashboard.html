@@ -255,6 +255,14 @@
               <input type="range" id="margin" min="0" max="0.3" step="0.01">
               <output id="margin-val" for="margin"></output>
             </label>
+            <label class="toggle"><input type="checkbox" id="lambda-on">
+              <span><strong>Cost weight (λ)</strong> instead of the margin<br>
+              <span class="hint">Picks the model with the best predicted quality minus λ × its cost relative to the dearest model for this request. λ 0.1 = give up 0.1 quality only to go from that price to free.</span></span>
+            </label>
+            <label class="slider" id="lambda-box">Cost weight λ
+              <input type="range" id="lambda" min="0" max="0.5" step="0.01">
+              <output id="lambda-val" for="lambda"></output>
+            </label>
             <label class="toggle"><input type="checkbox" id="turn-smoothing">
               <span><strong>Turn smoothing</strong> (recommended)<br>
               <span class="hint">Blends each message's prediction with the previous one, so a conversation doesn't switch model back and forth.</span>
@@ -461,15 +469,17 @@ const label = (m) => {
 function renderPrefs() {
   if (!prefs) return;
   const m = prefs.quality_margin;
+  const lam = prefs.cost_weight;
   let preset = null;
   document.querySelectorAll("[data-preset]").forEach((b) => {
-    const on = prefs.mode === "auto" && prefs.presets[b.dataset.preset] === m;
+    const on = prefs.mode === "auto" && lam == null && prefs.presets[b.dataset.preset] === m;
     if (on) preset = b.dataset.preset;
     b.classList.toggle("on", on);
     b.setAttribute("aria-pressed", on);
   });
   $("preset-note").textContent = prefs.mode !== "auto"
     ? `Routing is ${prefs.mode === "off" ? "off" : "pinned to " + short(prefs.pinned_model)} (Advanced settings)`
+    : lam != null ? `Cost weight λ ${lam.toFixed(2)} (Advanced settings)`
     : (preset ? PRESET_NOTES[preset] : `Custom margin ${m.toFixed(2)} (Advanced settings)`);
   $("pref-note").textContent = prefs.router_enabled ? ""
     : prefs.router_error ? `Router failed to load, so requests go through unrouted: ${prefs.router_error}`
@@ -492,6 +502,10 @@ function renderPrefs() {
     off: "Every request keeps the model Claude Code asked for"}[prefs.mode] || "";
   $("margin").value = m;
   $("margin-val").textContent = m.toFixed(2);
+  $("margin").disabled = lam != null;
+  $("lambda-on").checked = lam != null;
+  $("lambda-box").hidden = lam == null;
+  if (lam != null) { $("lambda").value = lam; $("lambda-val").textContent = lam.toFixed(2); }
   $("allow-upgrade").checked = !!prefs.allow_upgrade;
   $("turn-smoothing").checked = prefs.turn_smoothing !== false;
   $("turn-smoothing-warning").hidden = !prefs.turn_smoothing_warning;
@@ -640,6 +654,7 @@ function connect() {
 
 document.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", async () => {
   if (prefs && prefs.mode !== "auto") await setPref({mode: "auto"});
+  if (prefs && prefs.cost_weight != null) await setPref({cost_weight: null});  // a margin preset means the margin rule
   setPref({preset: b.dataset.preset});
 }));
 document.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () =>
@@ -649,6 +664,10 @@ $("allow-upgrade").addEventListener("change", (e) => setPref({allow_upgrade: e.t
 $("turn-smoothing").addEventListener("change", (e) => setPref({turn_smoothing: e.target.checked}));
 $("margin").addEventListener("input", (e) => { $("margin-val").textContent = parseFloat(e.target.value).toFixed(2); });
 $("margin").addEventListener("change", (e) => setPref({quality_margin: parseFloat(e.target.value)}));
+$("lambda-on").addEventListener("change", (e) =>
+  setPref(e.target.checked ? {cost_preset: "balanced"} : {cost_weight: null}));
+$("lambda").addEventListener("input", (e) => { $("lambda-val").textContent = parseFloat(e.target.value).toFixed(2); });
+$("lambda").addEventListener("change", (e) => setPref({cost_weight: parseFloat(e.target.value)}));
 $("roles").addEventListener("change", (e) => {
   const sel = e.target.closest("select[data-role]");
   if (sel) setPref({role: sel.dataset.role, model: sel.value}).then(() => sel.blur());

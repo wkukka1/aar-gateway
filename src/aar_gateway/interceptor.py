@@ -36,6 +36,7 @@ import collections
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -266,6 +267,8 @@ def configure(settings: dict, picker: ModelPicker | None, router_error: str | No
     saved = read_preferences()
     if saved.get("quality_margin") is not None:
         _settings["router"]["margin"] = saved["quality_margin"]
+    if "cost_weight" in saved:  # saved null = the user switched lambda off
+        _settings["router"]["cost_weight"] = saved["cost_weight"]
     _settings["routing"] = {"mode": saved.get("mode", "auto"), "pinned_model": saved.get("pinned_model"),
                             "allow_upgrade": bool(saved.get("allow_upgrade", False)),
                             "turn_smoothing": bool(saved.get("turn_smoothing", True))}
@@ -282,6 +285,17 @@ MARGIN_HEADER = "x-aar-quality-margin"
 #: the shipped MLP router) against always-GPT-5 (0.596 quality, $28.3 per 1k
 #: prompts): 0.01 -> 0.626 at $26.5; 0.05 -> 0.612 at $19.8; 0.08 -> 0.590 at $14.8.
 PRESETS = {"best_quality": 0.01, "balanced": 0.05, "save_more": 0.08}
+#: per-request override of lambda, e.g. ``ANTHROPIC_CUSTOM_HEADERS="x-aar-cost-weight: 0.1"``;
+#: ``off`` switches lambda off for that request (the margin rule applies)
+COST_WEIGHT_HEADER = "x-aar-cost-weight"
+#: named lambdas: how much predicted quality is worth giving up to go from the
+#: dearest eligible model's price to free (u = quality - lambda * cost / dearest cost).
+#: Calibrated for routers/manifold-nirt-claude-judged.npz, out-of-fold on 99
+#: LLM-judged mid-conversation turns (5 folds by conversation), vs always-Opus 0.711:
+#: 0.02 -> 0.706, 24% saved; 0.2 -> 0.665, 72% saved; 0.3 -> 0.657, 76% saved
+#: (investigations/profile_manifold/judge_finetune_cv_group.json). Other router files
+#: predict on other scales: re-measure before relying on these with them.
+COST_PRESETS = {"quality": 0.02, "balanced": 0.2, "save_more": 0.3}
 
 
 def preferences() -> dict:
@@ -289,6 +303,8 @@ def preferences() -> dict:
     overrides = read_preferences().get("role_models") or {}
     defaults = {**DEFAULT_ROLE_MODELS, **_config_roles}
     return {"quality_margin": _settings["router"]["margin"], "presets": PRESETS,
+            "cost_weight": _settings["router"].get("cost_weight"), "cost_presets": COST_PRESETS,
+            "cost_weight_header": COST_WEIGHT_HEADER,
             "router_enabled": _picker is not None, "router_error": _router_error,
             "strongest_model": _settings.get("strongest"),
             "header": MARGIN_HEADER, "mode": routing["mode"], "pinned_model": routing["pinned_model"],
@@ -404,6 +420,33 @@ def set_quality_margin(margin: float) -> dict:
     _settings["router"]["margin"] = margin
     _save_preferences(quality_margin=margin)
     return preferences()
+
+
+def set_cost_weight(weight: float | None) -> dict:
+    """Lambda on relative cost, applied to every new turn and kept across
+    restarts; ``None`` switches it off so the quality margin applies again."""
+    if weight is not None:
+        weight = float(weight)
+        if not 0.0 <= weight <= 1.0:
+            raise ValueError(f"cost_weight must be in [0, 1] or null, got {weight}")
+    _settings["router"]["cost_weight"] = weight
+    _save_preferences(cost_weight=weight)
+    return preferences()
+
+
+def _request_cost_weight(request: Request) -> float | None:
+    asked = request.headers.get(COST_WEIGHT_HEADER)
+    if asked is not None:
+        if asked.strip().lower() == "off":
+            return None
+        try:
+            value = float(asked)
+        except ValueError:
+            value = math.nan
+        if math.isfinite(value):   # "nan" parses and slips through a min/max clamp
+            return min(max(value, 0.0), 1.0)
+    saved = _settings["router"].get("cost_weight")
+    return None if saved is None else float(saved)
 
 
 def _request_margin(request: Request) -> float:
@@ -839,6 +882,7 @@ class _Turn:
             "best_predicted_quality": d.get("best_predicted_quality"),
             "candidates": d.get("candidates"),
             "quality_margin": d.get("quality_margin"),
+            "cost_weight": d.get("cost_weight"),
             "quality_source": d.get("quality_source"),
         }
 
@@ -944,6 +988,7 @@ async def _decide(turn: _Turn) -> None:
            "prev_quality": turn.session.get("quality"),
            "last_prompt_tokens": turn.session.get("prompt_tokens"),
            "quality_margin": _request_margin(turn.request),
+           "cost_weight": _request_cost_weight(turn.request),
            "allow_upgrade": bool(routing.get("allow_upgrade")),
            "turn_smoothing": bool(routing.get("turn_smoothing", True)),
            "usage_profile": turn.session.get("profile") or dict(_global_profile) or None,
@@ -1122,6 +1167,7 @@ def router_status() -> dict:
     rcfg = _settings.get("router") or {}
     status = {"enabled": _picker is not None, "error": _router_error,
               "kind": getattr(_picker, "router_kind", None),
+              "name": getattr(_picker, "router_name", None),
               "source": rcfg.get("artifact"),
               "models": sorted(_settings.get("models") or {})}
     if _picker is not None and hasattr(_picker, "calibration_status"):
@@ -1440,6 +1486,7 @@ def route_text(text: str, requested: str, session_id: str = "", est_prompt_token
         ctx = {"requested": requested, "human_text": text, "est_prompt_tokens": est,
                "last_model": loop.get("model"), "prev_quality": loop.get("quality"),
                "last_prompt_tokens": loop.get("prompt_tokens"), "quality_margin": None,
+               "cost_weight": _settings["router"].get("cost_weight"),
                "allow_upgrade": bool(routing.get("allow_upgrade")),
                "usage_profile": loop.get("profile") or dict(_global_profile) or None,
                "turn_smoothing": bool(routing.get("turn_smoothing", True)),

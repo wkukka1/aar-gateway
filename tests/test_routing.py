@@ -294,3 +294,76 @@ def test_calibration_status_never_waits_for_the_picker_lock(settings, router, tm
     release.set()
     worker.join(5)
     assert not still_held and answered[0]["graded_prompts"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# lambda on relative cost: u = quality - lambda * cost / dearest eligible cost  #
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def tiers(tmp_path):
+    """The 5.5 tiers: Sonnet costs exactly 0.5x Opus, Haiku 0.025x (under 100k tokens)."""
+    cfg = tmp_path / "tiers.yaml"
+    cfg.write_text("""
+interceptor:
+  router: {margin: 0.05}
+  models:
+    claude-opus-5-5:   {lane: anthropic, proxy: strong, context_window: 1000000}
+    claude-sonnet-5-5: {lane: anthropic, proxy: mid, context_window: 1000000}
+    claude-haiku-5-5:  {lane: anthropic, proxy: weak, context_window: 1000000}
+""")
+    return load_settings(cfg)
+
+
+TIER_BODY = {**BODY, "model": "claude-opus-5-5"}
+
+
+def tctx(**kw):
+    return ctx(requested="claude-opus-5-5", **kw)
+
+
+def test_lambda_unset_leaves_the_margin_rule_unchanged(tiers, router):
+    pick = build_picker(tiers, router_model=router)
+    plain = pick(TIER_BODY, tctx(quality_margin=0.02))
+    off = pick(TIER_BODY, tctx(quality_margin=0.02, cost_weight=None))
+    assert plain == off and off["cost_weight"] is None
+
+
+def test_lambda_zero_takes_the_best_predicted_model(tiers, router):
+    router.scores = HARD
+    decision = build_picker(tiers, router_model=router)(TIER_BODY, tctx(cost_weight=0.0))
+    assert decision["model"] == "claude-opus-5-5" and decision["cost_weight"] == 0.0
+
+
+def test_a_large_lambda_takes_the_cheapest_model(tiers, router):
+    decision = build_picker(tiers, router_model=router)(TIER_BODY, tctx(cost_weight=1.0))
+    assert decision["model"] == "claude-haiku-5-5" and "relative cost" in decision["reason"]
+
+
+def test_lambda_trades_quality_for_relative_cost(tiers, router):
+    """HARD: Opus 0.72, Sonnet 0.55, Haiku 0.50 at relative costs 1, 0.5, 0.025.
+    lambda 0.2: Opus 0.52 > Haiku 0.495 > Sonnet 0.45; lambda 0.3: Haiku 0.4925 > Opus 0.42."""
+    router.scores = HARD
+    pick = build_picker(tiers, router_model=router)
+    assert pick(TIER_BODY, tctx(cost_weight=0.2))["model"] == "claude-opus-5-5"
+    assert pick(TIER_BODY, tctx(cost_weight=0.3))["model"] == "claude-haiku-5-5"
+
+
+@pytest.mark.parametrize("lam, want", [(0.2, "claude-opus-5-5"), (0.3, "claude-haiku-5-5")])
+def test_one_lambda_means_the_same_on_a_short_and_a_long_request(tiers, router, lam, want):
+    router.scores = HARD
+    pick = build_picker(tiers, router_model=router)
+    for tokens in (2_000, 90_000):   # 45x the cost, the same relative costs
+        assert pick(TIER_BODY, tctx(cost_weight=lam, est_prompt_tokens=tokens))["model"] == want
+
+
+def test_a_router_file_that_scores_the_tiers_directly_needs_no_proxy(tiers):
+    class TierRouter(FakeRouter):
+        model_ids = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+
+    r = TierRouter()
+    r.scores = {"claude-opus-5-5": 0.72, "claude-sonnet-5-5": 0.55, "claude-haiku-5-5": 0.50}
+    decision = build_picker(tiers, router_model=r)(TIER_BODY, tctx(cost_weight=0.0))
+    assert decision["model"] == "claude-opus-5-5"
+    assert decision["model_quality"] == {"claude-opus-5-5": 0.72, "claude-sonnet-5-5": 0.55,
+                                         "claude-haiku-5-5": 0.50}
+    assert decision["quality_source"] == "router scores the models directly"

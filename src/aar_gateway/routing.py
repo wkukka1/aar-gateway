@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ._core.constraints import RoutingConstraints
+from ._core.constraints import OptimizationObjective, RoutingConstraints
 from ._core.context import RoutingContext, RoutingRequest
 from ._core.decision import ModelScore
 from ._core.profile import LLMProfile
@@ -44,6 +44,7 @@ from .translate import untranslatable_reason
 #: ``(body, ctx) -> decision dict`` or ``None`` (keep the client's model).
 #: ``ctx``: requested, human_text, est_prompt_tokens, last_model, last_prompt_tokens,
 #: quality_margin (the user's cost preference; ``None`` = the configured default),
+#: cost_weight (lambda on relative cost; when set it replaces the margin rule),
 #: warm_tokens ({model: prefix tokens it has cached recently}), blocked
 #: ({model: why the upstream rejected it for this client}).
 ModelPicker = Callable[[dict, dict], dict | None]
@@ -95,6 +96,16 @@ def price_for(settings: Mapping, model: str | None) -> Mapping | None:
     return prices if prices is not None else CLAUDE_PRICES.get(model)
 
 
+def router_column(model: str, spec: Mapping, pool) -> str | None:
+    """The router-file column that scores ``model``: its ``proxy`` when the file
+    has it, else the model's own id when the file scores it directly (a file
+    folded over the Claude tiers' own profiles), else the proxy (absent -> skipped)."""
+    proxy = spec.get("proxy")
+    if proxy in pool or model not in pool:
+        return proxy
+    return model
+
+
 def load_router_model(rcfg: Mapping):
     """The trained ranker the gateway scores prompts with: the router file at
     ``artifact`` (``aar-gateway setup`` installs one) -- a trained MLP (weights
@@ -104,8 +115,9 @@ def load_router_model(rcfg: Mapping):
         raise ValueError("router.enabled needs router.artifact: the path of a router file "
                          "(run `aar-gateway setup` to install one)")
     from ._core.scorers import load_router
+    from .config import encoders_dir
 
-    return load_router(rcfg["artifact"])
+    return load_router(rcfg["artifact"], encoders_dir=encoders_dir())
 
 
 def calibration_offsets(graded_file: Path, router_model, settings: Mapping,
@@ -123,7 +135,7 @@ def calibration_offsets(graded_file: Path, router_model, settings: Mapping,
     frame = router_model.route_text(prompts).score_frame().reset_index(drop=True)
     offsets = {}
     for j, model in enumerate(models):
-        proxy = (settings["models"].get(model) or {}).get("proxy")
+        proxy = router_column(model, settings["models"].get(model) or {}, frame.columns)
         rows = np.flatnonzero(~np.isnan(scores[:, j]))
         if proxy not in frame.columns or not len(rows):
             continue
@@ -253,7 +265,7 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
         scores, skipped, raw_quality = [], {}, {}
         for model, spec in settings["models"].items():
             price = price_for(settings, model)
-            proxy = spec.get("proxy")
+            proxy = router_column(model, spec, pool)
             reason = unavailable_reason(model, body, settings, ctx.get("blocked") or {}, ctx["est_prompt_tokens"])
             if reason is None:
                 if use_graded and model not in own["quality"]:
@@ -287,19 +299,32 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
                                      expected_cost=estimate(model, spec, price, ctx)))
         if not scores:
             return {"model": ctx["requested"], "reason": "no eligible candidates", "skipped": skipped}
-        request = RoutingRequest(request_id="gateway", prompt=ctx["human_text"],
-                                 constraints=RoutingConstraints(quality_margin=ctx.get("quality_margin")))
+        direct = not use_graded and all(router_column(s.model.model_id, settings["models"][s.model.model_id], pool)
+                                        == s.model.model_id for s in scores)
+        lam = ctx.get("cost_weight")
+        if lam is not None:
+            # lambda on RELATIVE cost: u = q - lam * cost / cost of the dearest eligible
+            # model for this request, so one lam means the same on a short and a
+            # 200k-token request. Folded into the objective's $-slope, so utility()
+            # stays the one definition; margin 0 makes the policy an argmax of it.
+            c_ref = max(s.expected_cost for s in scores)
+            objective = OptimizationObjective(cost_weight=float(lam) / c_ref if c_ref > 0 else 0.0)
+            constraints = RoutingConstraints(objective=objective, quality_margin=0.0)
+        else:
+            constraints = RoutingConstraints(quality_margin=ctx.get("quality_margin"))
+        request = RoutingRequest(request_id="gateway", prompt=ctx["human_text"], constraints=constraints)
         context = RoutingContext(request=request, signals=PromptSignals(),
                                  candidates=[s.model for s in scores])
         decision = policy.decide(context, scores)
         chosen = next(s for s in scores if s.model.model_id == decision.selected_model_id)
         stay = next((s for s in scores if s.model.model_id == requested), None)
-        reason = decision.reason
+        reason = decision.reason if lam is None else f"max quality - {float(lam):g} x relative cost"
         current = next((s for s in scores if s.model.model_id == ctx.get("last_model")), None)
         if current is not None and chosen is not current \
                 and chosen.model.output_cost_per_token > current.model.output_cost_per_token:
             # an upgrade for quality: only worth a cache rewrite if the gap is clear
-            margin = policy.margin if ctx.get("quality_margin") is None else ctx["quality_margin"]
+            margin = (0.0 if lam is not None
+                      else policy.margin if ctx.get("quality_margin") is None else ctx["quality_margin"])
             if current.expected_quality >= max(raw_quality.values()) - margin - switch_margin:
                 chosen = current
                 reason = f"stays on {current.model.model_id}: gap under {margin + switch_margin:g}"
@@ -313,12 +338,15 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
             "est_cost_requested": round(stay.expected_cost, 6) if stay else None,
             "candidates": len(scores),
             "quality_source": (f"graded ({own['neighbors']} similar of {own['graded_prompts']})" if use_graded
+                               else "router scores the models directly" if direct
                                else "benchmark stand-ins, calibrated on your grades" if shift
                                else "benchmark stand-ins"),
             "quality_margin": policy.margin if ctx.get("quality_margin") is None else ctx["quality_margin"],
+            "cost_weight": lam,
             "skipped": skipped,
         }
 
     pick.calibration_status = calibration_status
     pick.router_kind = getattr(router_model, "kind", None)  # what actually loaded
+    pick.router_name = getattr(router_model, "name", None)  # the file's artifact_id when it has one
     return pick

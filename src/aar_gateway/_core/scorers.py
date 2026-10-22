@@ -32,11 +32,15 @@ class ScoreResult:
         return [str(self.scores.columns[i]) for i in self.selected]
 
 
-def _artifact_encoder(spec: dict) -> dict:
+def _artifact_encoder(spec: dict, encoders_dir=None) -> dict:
     """The encoder a file names, served without PyTorch when it can be: a
-    sentence-transformers model runs on ``fastembed`` (same vectors) if installed."""
-    spec = {k: v for k, v in spec.items() if k in ("backend", "model_name", "normalize", "max_seq_length")}
+    sentence-transformers model runs on ``fastembed`` (same vectors) if installed.
+    A local ONNX encoder's relative ``model_path`` is a folder under ``encoders_dir``."""
+    spec = {k: v for k, v in spec.items()
+            if k in ("backend", "model_name", "normalize", "max_seq_length", "model_path", "pooling", "dim")}
     spec["backend"] = light_backend(spec.get("backend", "sentence_transformer"))
+    if spec.get("model_path") and encoders_dir is not None and not Path(spec["model_path"]).is_absolute():
+        spec["model_path"] = str(Path(encoders_dir) / spec["model_path"])
     return spec
 
 
@@ -56,6 +60,7 @@ class TextRouter:
         self._costs = np.asarray(model_costs, dtype=float) if model_costs is not None else None
         self._encoder = encoder
         self._encoder_spec = dict(encoder_spec or {})
+        self._encoders_dir = None   # where a local ONNX encoder's folder lives (load_router sets it)
 
     @property
     def model_ids(self) -> list[str]:
@@ -73,7 +78,8 @@ class TextRouter:
     def _encode(self, texts: Sequence[str], encoder=None) -> np.ndarray:
         encoder = encoder or self._encoder
         if encoder is None:
-            encoder = self._encoder = TextEncoder(EncoderConfig(name=self.name, **_artifact_encoder(self._encoder_spec)))
+            encoder = self._encoder = TextEncoder(EncoderConfig(
+                name=self.name, **_artifact_encoder(self._encoder_spec, self._encoders_dir)))
         return np.asarray(encoder.encode(list(texts)), dtype=np.float32)
 
     def predict_scores_text(self, texts: Sequence[str], *, encoder=None) -> pd.DataFrame:
@@ -138,9 +144,14 @@ class MLPRouter(TextRouter):
         return pd.DataFrame(self._forward(x), index=list(range(len(x))), columns=self._model_ids)
 
 
-def load_router(path, *, encoder=None) -> TextRouter:
-    """The router a file holds (``aar-gateway setup`` installs one)."""
+def load_router(path, *, encoder=None, encoders_dir=None) -> TextRouter:
+    """The router a file holds (``aar-gateway setup`` installs one). ``encoders_dir``:
+    where a file's local ONNX encoder folder (``encoder.model_path``) lives."""
     payload, header = load_router_file(Path(path).expanduser())
     if header["format"] == "mlp":
-        return MLPRouter.from_payload(payload, header, encoder=encoder, name=f"mlp:{Path(path).stem}")
-    return KNNRouter.from_payload(payload, encoder=encoder)
+        router = MLPRouter.from_payload(payload, header, encoder=encoder,
+                                        name=header.get("artifact_id") or f"mlp:{Path(path).stem}")
+    else:
+        router = KNNRouter.from_payload(payload, encoder=encoder)
+    router._encoders_dir = encoders_dir
+    return router

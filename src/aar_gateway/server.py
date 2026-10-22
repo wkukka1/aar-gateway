@@ -239,6 +239,12 @@ async def update_preferences(request: Request):
             return interceptor.set_allow_upgrade(bool(body["allow_upgrade"]))
         if "role" in body:
             return interceptor.set_role_model(body["role"], body.get("model"))
+        if body.get("cost_preset") is not None:
+            if body["cost_preset"] not in interceptor.COST_PRESETS:
+                raise HTTPException(400, f"unknown cost_preset {body['cost_preset']!r}")
+            return interceptor.set_cost_weight(interceptor.COST_PRESETS[body["cost_preset"]])
+        if "cost_weight" in body:  # null switches lambda off
+            return interceptor.set_cost_weight(body["cost_weight"])
     except (TypeError, ValueError) as exc:  # TypeError: a list or object where a name or number belongs
         raise HTTPException(400, str(exc)) from exc
     margin = body.get("quality_margin")

@@ -19,6 +19,13 @@ class EncoderConfig:
     batch_size: int = 64
     normalize: bool = True
     max_seq_length: int = 256
+    #: a LOCAL ONNX encoder (fastembed only): the folder holding ``model.onnx`` and
+    #: its tokenizer files, registered as a fastembed custom model -- how a router
+    #: file trained on an encoder fastembed doesn't ship (raw BERT) is served
+    #: without PyTorch. ``pooling`` ({"mean", "cls"}) and ``dim`` describe it.
+    model_path: Optional[str] = None
+    pooling: Optional[str] = None
+    dim: Optional[int] = None
 
     def __post_init__(self):
         if self.backend not in _BACKENDS:
@@ -37,6 +44,31 @@ def light_backend(backend: str = "sentence_transformer") -> str:
     return "fastembed"
 
 
+def _local_fastembed(cfg: EncoderConfig):
+    """A fastembed model served from ``cfg.model_path``: registered once as a custom
+    model (pooling over the ONNX ``last_hidden_state``, no normalisation here --
+    :meth:`TextEncoder.encode` applies ``cfg.normalize``), truncated at
+    ``max_seq_length`` like the encoder it was trained with."""
+    from pathlib import Path
+
+    from fastembed import TextEmbedding
+    from fastembed.common.model_description import ModelSource, PoolingType
+
+    path = Path(cfg.model_path).expanduser()
+    if not (path / "model.onnx").is_file():
+        raise FileNotFoundError(f"encoder {cfg.model_name!r}: no model.onnx in {path} "
+                                "(create it with scripts/routing/export_bert_encoder.py)")
+    if cfg.model_name not in {m["model"] for m in TextEmbedding.list_supported_models()}:
+        TextEmbedding.add_custom_model(
+            model=cfg.model_name, pooling=PoolingType.CLS if cfg.pooling == "cls" else PoolingType.MEAN,
+            normalization=False, sources=ModelSource(hf=cfg.model_name), dim=int(cfg.dim or 768),
+            model_file="model.onnx")
+    model = TextEmbedding(cfg.model_name, specific_model_path=str(path))
+    if cfg.max_seq_length:
+        model.model.tokenizer.enable_truncation(max_length=int(cfg.max_seq_length))
+    return model
+
+
 class TextEncoder:
     def __init__(self, cfg: EncoderConfig):
         self.cfg = cfg
@@ -45,7 +77,9 @@ class TextEncoder:
     @property
     def model(self):
         if self._model is None:
-            if self.cfg.backend == "fastembed":
+            if self.cfg.backend == "fastembed" and self.cfg.model_path:
+                self._model = _local_fastembed(self.cfg)
+            elif self.cfg.backend == "fastembed":
                 from fastembed import TextEmbedding
 
                 self._model = TextEmbedding(self.cfg.model_name)
