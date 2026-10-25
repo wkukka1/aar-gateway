@@ -6,6 +6,7 @@ router."""
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 import pytest
@@ -833,3 +834,28 @@ def test_a_nan_lambda_header_falls_back_to_the_saved_value(env):
     client.post("/v1/messages", json=turn("a"), headers={**AUTH, interceptor.COST_WEIGHT_HEADER: "nan"})
     client.post("/v1/messages", json=turn("b"), headers={**AUTH, interceptor.COST_WEIGHT_HEADER: "inf"})
     assert seen == [0.1, 0.1]
+
+
+def test_a_switch_back_credits_the_asked_models_cache_only_while_it_is_alive(env):
+    """Seen live: a conversation switched to Haiku and back to Opus after a long
+    gap was priced as if Opus still held its 735k-token prefix ($0.27 baseline
+    against $5.89 real). The counterfactual may credit a cache only while the
+    proxy would still count it (an hour), like the proxy does."""
+    client, settings, _, _ = env
+    interceptor.configure(settings, None)
+    sid = "s-held-0123456789"
+    key = f"{sid[:12]}:main"
+    usage = {"input_tokens": 2, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 50000}
+    report = {"session_id": sid, "requested_model": "claude-opus-5", "routed_model": "claude-haiku-4-5",
+              "new_turn": True, **usage}
+    client.post("/api/mod-record", json={**report, "routed_model": "claude-opus-5"})  # Opus ran here
+    client.post("/api/mod-record", json=report)  # switched to Haiku
+    interceptor._mod_loops[key]["held"]["claude-opus-5"] = [time.monotonic() - 7200, 50000]  # two hours ago
+    back = client.post("/api/mod-record", json={**usage, "session_id": sid, "requested_model": "claude-opus-5",
+                                               "routed_model": "claude-opus-5", "new_turn": True}).json()
+    assert back["cost_if_requested_usd"] == pytest.approx(back["cost_usd"])  # no credit: the cache is gone
+    interceptor._mod_loops[key]["held"]["claude-opus-5"] = [time.monotonic() - 60, 50000]  # a minute ago
+    client.post("/api/mod-record", json={**report, "routed_model": "claude-haiku-4-5"})
+    warm = client.post("/api/mod-record", json={**usage, "session_id": sid, "requested_model": "claude-opus-5",
+                                               "routed_model": "claude-opus-5", "new_turn": True}).json()
+    assert warm["cost_if_requested_usd"] < back["cost_if_requested_usd"]  # a minute old: the prefix is credited
