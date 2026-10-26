@@ -37,9 +37,30 @@ under [The router file](#the-router-file).
 The config is `AAR_GATEWAY_CONFIG` if set, else `~/.aar-gateway/config.yaml`
 if it exists, else the defaults (router off).
 
+## Two routers: quality and savings
+
+The gateway serves two router files, and the cost preference decides which one prices a turn:
+
+| Turn priced by | Router | Config key | Calibrated for |
+|---|---|---|---|
+| Quality margin: Best quality, Balanced or Save more | `llmrouterbench-mlp` (default) | `router.artifact` | Better quality: the trained network, read through each tier's `proxy` |
+| Cost weight λ: the λ presets, or `x-aar-cost-weight` | `manifold-nirt-claude-judged` (default) | `router.savings_artifact` | Most savings: scores the Claude tiers directly |
+
+* A turn with λ set is priced by the savings router. A turn on the margin is priced by the
+  margin router. One turn never mixes the two: their predicted qualities are on different scales.
+* The dashboard's **Save more** preset is a margin, so it stays on the margin router. For the
+  manifold's savings, use a λ preset: `cost_preset` `balanced` or `save_more` (Advanced settings → Cost weight).
+* When the user's own grades cover a prompt, quality comes from those grades under either rule
+  (`quality_source: graded`), as before.
+* If the savings file can't load (for example, its BERT encoder folder is missing), λ turns use the
+  margin router, margin turns are unaffected, and `/health` reports why under `savings.error`.
+  The bundled manifold needs the encoder described in [The judged manifold router](#the-judged-manifold-router-manifold-nirt-claude-judged).
+* `aar-gateway router use` swaps the margin router only. The savings router is set in the config
+  with `router.savings_artifact` (`null` turns it off).
+
 ## The router file
 
-The gateway serves its router from one small file. **The shipped one is a
+The gateway's margin router is one small file. **The shipped one is a
 trained network** ([`MLPArtifactPayload`](../src/aar_gateway/_core/artifacts.py)):
 a prompt's embedding in, a predicted score per model out (`Linear → ReLU →
 Linear`, 256 hidden units). The file holds only the weights, **0.38 MB, no
@@ -102,6 +123,9 @@ aar-gateway router use llmrouterbench-nirt
 aar-gateway router use llmrouterbench-mlp          # back to the default
 aar-gateway router add my-router.npz [--name NAME] # into ~/.aar-gateway/routers/
 ```
+
+`router list` also shows `manifold-nirt-claude-judged`, the savings router. Don't `use` it here: that
+would serve it under the margin rule, which it is not calibrated for. It is set by `router.savings_artifact`.
 
 Added files live in `~/.aar-gateway/routers/`, and a name there wins over a bundled one.
 (`~/.aar-gateway/models/` is the text encoder's cache.) `status`, `doctor` and `/health`
@@ -318,7 +342,7 @@ or `{"cost_weight": null}` to switch it off, or for one session:
 ANTHROPIC_CUSTOM_HEADERS="x-aar-cost-weight: 0.05" claude    # "off" = use the margin
 ```
 
-The λ presets are calibrated for the router file `manifold-nirt-claude-judged`
+The λ presets are calibrated for the savings router `manifold-nirt-claude-judged`
 (below), out-of-fold on 99 LLM-judged mid-conversation turns, folds by
 conversation, against always using Opus (quality 0.711):
 
@@ -333,23 +357,25 @@ turns Opus → Sonnet without picking the right ones); skip that range. On a pro
 source the file never trained on, `save_more` measured +0.029 vs mix at 73% saved
 (−0.081 quality), and on a separately graded 65-prompt pool the file did not beat
 the mix line: the presets transfer to traffic like the judged turns, not to all
-traffic. With another router file, re-measure before trusting them.
+traffic. With another savings router file, re-measure before trusting them.
 
 ### The judged manifold router (`manifold-nirt-claude-judged`)
 
-A profile-manifold NIRT (`investigations/profile_manifold/`) fine-tuned on the
+The default savings router (`router.savings_artifact`). A profile-manifold NIRT
+(`investigations/profile_manifold/`) fine-tuned on the
 99 judged turns (`scripts/routing/export_judged_router.py`: three seeds, every
 weight at lr 1e-3 plus per-tier offsets, folded over the tiers' own profiles,
 their logits averaged into one `mlp` file). It encodes prompts with raw BERT,
 which fastembed doesn't ship: export the encoder once with
 `python scripts/routing/export_bert_encoder.py` (writes
 `~/.aar-gateway/encoders/bert-base-uncased-mean`, 436 MB; checked against the
-training encoder to 2e-6). Without that folder the router fails to load and the
-gateway forwards requests unrouted, as for any router error.
+training encoder to 2e-6). Until that folder exists the savings router fails to load: λ turns
+then use the margin router, and `/health` shows the error under `savings.error`. Margin turns
+don't need the encoder.
 
 ### Router files that score the tiers directly
 
-The shipped files predict quality for benchmark models and read each tier
+The benchmark routers (`llmrouterbench-mlp`, `llmrouterbench-nirt`) predict quality for benchmark models and read each tier
 through its `proxy`. A file whose columns are the tier ids themselves (exported
 with `scripts/routing/export_router.py --kind nirt --pool
 claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5`, which scores each tier from

@@ -34,6 +34,12 @@ interceptor:
     # default, bundled with the package) or a kNN index over a pool's training
     # prompts. It needs no training data and no PyTorch.
     artifact: ~/.aar-gateway/router.npz
+    # The router that prices lambda turns (cost_weight below) for savings: the
+    # judged manifold, bundled with the package. It scores the Claude tiers
+    # directly and needs its BERT encoder in ~/.aar-gateway/encoders/ (see
+    # docs/gateway.md); without it lambda turns use `artifact` instead. Unset =
+    # the bundled file; null = off.
+    # savings_artifact: /path/to/another-savings-router.npz
     # Cost preference: how much predicted quality a turn may give up for a
     # cheaper model. Presets (calibrated on LLMRouterBench's held-out split):
     # best_quality 0.01, balanced 0.05, save_more 0.08. Users change it live

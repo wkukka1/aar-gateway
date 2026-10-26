@@ -43,6 +43,8 @@ from pathlib import Path
 
 from aar_gateway.config import append_jsonl, gateway_home, read_jsonl
 from aar_gateway.claude_cli import ClaudeSubscriptionAdapter
+from aar_gateway.grading.rubric import RUBRICS, criteria_prompt, parse_criteria
+from aar_gateway.grading.rubric import VERSION as RUBRIC_VERSION
 
 DEFAULT_TIERS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 DEFAULT_JUDGE = "claude-opus-5-5"
@@ -140,10 +142,17 @@ def judge_prompt(request: str, answers: dict[str, str], reference: str | None = 
 
 
 def grade_turn(turn: dict, tiers: tuple[str, ...], judge_model: str, *, timeout: float,
-               rng: random.Random) -> list[dict]:
+               rng: random.Random, rubric: str = "standard", judgments: int = 1) -> list[dict]:
+    """Replay ``turn`` on each tier and judge the answers under ``rubric`` (``standard``:
+    one 0-10 score; ``criteria``: :mod:`aar_gateway.grading.rubric`, whose overall score
+    is the row's ``score``). ``judgments`` > 1 judges the same answers that many times,
+    each shuffled afresh, and averages them: one judgment's tier ranking flips often
+    (measured: 2 vs 2 judgments agreed 70% on the cheapest adequate tier, 1 vs 1 62%)."""
     cwd = turn.get("cwd") if turn.get("cwd") and Path(turn["cwd"]).is_dir() else None
     replays: dict[str, dict] = {}
-    with tempfile.TemporaryDirectory(prefix="aar-grade-") as scratch:
+    # Windows: a claude CLI child can still hold a file in the folder at cleanup (WinError 32);
+    # that must not end the whole run after the turn was graded
+    with tempfile.TemporaryDirectory(prefix="aar-grade-", ignore_cleanup_errors=True) as scratch:
         for model in tiers:
             try:
                 resp = ClaudeSubscriptionAdapter(model, timeout=timeout).complete(
@@ -154,38 +163,88 @@ def grade_turn(turn: dict, tiers: tuple[str, ...], judge_model: str, *, timeout:
                 replays[model] = {"answer": None, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
         answered = [m for m in tiers if replays[m].get("answer")]
-        labels = [chr(ord("A") + i) for i in range(len(answered))]
-        order = answered[:]
-        rng.shuffle(order)
-        by_label = dict(zip(labels, order, strict=True))
-        scores: dict[str, tuple[float | None, str, bool | None]] = {}
-        judge_error = None
-        if answered:
-            try:
-                verdict = ClaudeSubscriptionAdapter(judge_model, timeout=timeout).complete(
-                    judge_prompt(turn["prompt"], {lab: replays[m]["answer"] for lab, m in by_label.items()},
-                                 turn.get("reference")),
-                    cwd=scratch, extra_args=READ_ONLY)
-                scores = parse_verdicts(verdict.content, labels)
-            except Exception as exc:
-                judge_error = f"{type(exc).__name__}: {exc}"[:300]
+        verdicts: list[dict[str, dict]] = []  # per judgment: model -> its verdict
+        judge_usd, judge_error = 0.0, None
+        for _ in range(max(1, judgments) if answered else 0):
+            # each judgment sees its own shuffle: one judge's position bias doesn't repeat
+            got, usd, err = _judge_once(turn, {m: replays[m]["answer"] for m in answered}, judge_model, rubric,
+                                        timeout=timeout, rng=rng, cwd=cwd, scratch=scratch)
+            judge_usd += usd or 0.0
+            judge_error = judge_error or err
+            verdicts.append(got)
 
-    model_score = {m: scores.get(lab, (None, "", None)) for lab, m in by_label.items()}
+    rubric_tag = f"criteria-{RUBRIC_VERSION}" if rubric == "criteria" else "standard"
     now = datetime.now(UTC).isoformat(timespec="seconds")
     rows = []
     for model in tiers:
-        score, reason, matches = model_score.get(model, (None, "", None))
+        merged = _merge_verdicts([v[model] for v in verdicts if v.get(model)])
         rep = replays[model]
         rows.append({
             "ts": now, "prompt_hash": turn["prompt_hash"], "prompt": turn["prompt"],
-            "cwd": turn.get("cwd"), "model": model, "score": score, "reason": reason,
+            "cwd": turn.get("cwd"), "model": model, "score": merged["score"], "reason": merged["reason"],
             "answer": (rep.get("answer") or "")[:4000], "usage_usd": rep.get("usage_usd"),
-            "judge_model": judge_model, "error": rep.get("error") or judge_error,
+            "judge_model": judge_model,
+            "error": rep.get("error") or (judge_error if merged["score"] is None else None),
             "subagent": bool(turn.get("subagent")), "agent_role": turn.get("agent_role"),
-            "matches_best": matches, "source": turn.get("source"), "group": turn.get("group"),
-            "with_reference": bool(turn.get("reference")),
+            "matches_best": merged["matches_best"], "source": turn.get("source"), "group": turn.get("group"),
+            "with_reference": bool(turn.get("reference")), "rubric": rubric_tag,
+            # the judge's plan usage for the whole turn (every row of the turn carries the same total)
+            "judge_usage_usd": round(judge_usd, 6) if verdicts else None,
+            **({"judge_scores": merged["scores"]} if judgments > 1 else {}),
+            **({"criteria": merged.get("criteria"), "hallucinations": merged.get("hallucinations")}
+               if rubric == "criteria" else {}),
         })
     return rows
+
+
+def _judge_once(turn: dict, answers: dict[str, str], judge_model: str, rubric: str, *, timeout: float,
+                rng: random.Random, cwd: str | None, scratch: str) -> tuple[dict[str, dict], float | None, str | None]:
+    """One judge call on ``answers`` (model -> text), shuffled and lettered: ``({model:
+    verdict}, plan usage, error)``. A verdict has ``score``, ``reason``, ``matches_best``
+    and, under the criteria rubric, ``criteria`` and ``hallucinations``."""
+    order = list(answers)
+    rng.shuffle(order)
+    by_label = {chr(ord("A") + i): m for i, m in enumerate(order)}
+    shown = {lab: answers[m] for lab, m in by_label.items()}
+    if rubric == "criteria":
+        prompt = criteria_prompt(turn["prompt"], shown, empty_folder=cwd is None, reference=turn.get("reference"),
+                                 reference_note=REFERENCE_NOTE, answer_chars=ANSWER_CHARS)
+    else:
+        prompt = judge_prompt(turn["prompt"], shown, turn.get("reference"))
+    try:
+        verdict = ClaudeSubscriptionAdapter(judge_model, timeout=timeout).complete(
+            prompt, cwd=scratch, extra_args=READ_ONLY)
+    except Exception as exc:
+        return {}, None, f"{type(exc).__name__}: {exc}"[:300]
+    usd = (verdict.meta or {}).get("subscription_cost_usd_equivalent")
+    if rubric == "criteria":
+        parsed = parse_criteria(verdict.content, by_label)
+    else:
+        parsed = {lab: {"score": s, "reason": why, "matches_best": mb}
+                  for lab, (s, why, mb) in parse_verdicts(verdict.content, by_label).items()}
+    return {m: parsed[lab] for lab, m in by_label.items()}, usd, None
+
+
+def _merge_verdicts(vs: list[dict]) -> dict:
+    """Several judgments of one answer as one: the mean score and per-criterion means,
+    ``matches_best`` by majority (a tie counts as true), the first reason, every
+    hallucination named once, and the individual scores."""
+    scored = [v for v in vs if v.get("score") is not None]
+    out = {"score": sum(v["score"] for v in scored) / len(scored) if scored else None,
+           "reason": next((v["reason"] for v in scored if v.get("reason")), ""),
+           "scores": [v.get("score") for v in vs]}
+    votes = [v["matches_best"] for v in scored if isinstance(v.get("matches_best"), bool)]
+    out["matches_best"] = (2 * sum(votes) >= len(votes)) if votes else None
+    if any("criteria" in v for v in vs):
+        keys = {k for v in scored for k in (v.get("criteria") or {})}
+        crit = {}
+        for k in sorted(keys):
+            vals = [v["criteria"][k] for v in scored if (v.get("criteria") or {}).get(k) is not None]
+            crit[k] = sum(vals) / len(vals) if vals else None
+        out["criteria"] = crit if scored else None
+        out["hallucinations"] = list(dict.fromkeys(h for v in scored for h in v.get("hallucinations") or [])) \
+            if scored else None
+    return out
 
 
 def _turns(turns_file: Path | None) -> list[dict]:
@@ -207,7 +266,7 @@ def _turns(turns_file: Path | None) -> list[dict]:
 def grade(n: int, *, tiers: tuple[str, ...] = DEFAULT_TIERS, judge_model: str = DEFAULT_JUDGE,
           workers: int = 2, timeout: float = 600.0, seed: int = 0,
           turns_file: Path | None = None, out_file: Path | None = None,
-          subagents: bool | None = None) -> list[dict]:
+          subagents: bool | None = None, rubric: str = "standard", judgments: int = 1) -> list[dict]:
     out_file = out_file or _home() / "graded.jsonl"
     todo = pending_turns(_turns(turns_file), read_jsonl(out_file), subagents=subagents)
     rng = random.Random(seed)
@@ -218,7 +277,8 @@ def grade(n: int, *, tiers: tuple[str, ...] = DEFAULT_TIERS, judge_model: str = 
 
     def one(i_turn):
         i, turn = i_turn
-        return grade_turn(turn, tiers, judge_model, timeout=timeout, rng=random.Random(seed + i))
+        return grade_turn(turn, tiers, judge_model, timeout=timeout, rng=random.Random(seed + i), rubric=rubric,
+                          judgments=judgments)
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
     # submitted a few at a time (never the whole list up front), so a usage
@@ -289,6 +349,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--timeout", type=float, default=600.0, help="seconds per CLI call")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rubric", choices=RUBRICS, default="standard",
+                    help="criteria: relevance, accuracy (hallucinations listed), completeness, conciseness, "
+                         "consistency, balance, uncertainty, then overall")
+    ap.add_argument("--judgments", type=int, default=1,
+                    help="judge each turn's answers this many times (fresh shuffle each) and average")
     ap.add_argument("--summary", action="store_true", help="only summarize what is already graded")
     ap.add_argument("--turns", help="turns to grade (default: the on-device history and turns.jsonl); "
                                     "e.g. a prompt pool from aar_gateway.grading.pool")
@@ -320,7 +385,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.summary:
         grade(args.n, tiers=tuple(t.strip() for t in args.tiers.split(",") if t.strip()),
               judge_model=args.judge, workers=args.workers, timeout=args.timeout, seed=args.seed,
-              subagents=only, turns_file=turns_file, out_file=out_file)
+              subagents=only, turns_file=turns_file, out_file=out_file, rubric=args.rubric,
+              judgments=args.judgments)
     print(summarize(read_jsonl(out_file), subagents=only))
     return 0
 

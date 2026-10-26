@@ -38,7 +38,12 @@ DEFAULT_MODELS: dict[str, dict] = {
     "claude-haiku-4-5": {"lane": "anthropic", "proxy": "gemini-2.5-flash", "context_window": 200_000,
                          "rejects": ["effort"]},
 }
+#: the router that serves savings: a turn priced by cost weight (lambda) is scored by it. It scores
+#: the Claude tiers directly, so it needs no proxies and no stand-ins; its BERT encoder is
+#: ``aar-gateway``'s ``encoders/bert-base-uncased-mean`` (see docs/gateway.md).
+BUNDLED_SAVINGS_ROUTER = Path(__file__).with_name("routers") / "manifold-nirt-claude-judged.npz"
 DEFAULT_ROUTER = {"enabled": False, "artifact": None, "margin": 0.05, "cost_weight": None,
+                  "savings_artifact": str(BUNDLED_SAVINGS_ROUTER),
                   "expected_output_tokens": 800, "cache_ttl": "1h", "horizon_requests": 20,
                   "switch_margin": 0.05, "turn_smoothing": 0.5}
 #: Claude Code subagents (``aar_gateway.subagents``): ``roles`` maps a role

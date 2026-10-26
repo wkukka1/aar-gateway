@@ -5,6 +5,7 @@ the turn's folder, the judge sees anonymised answers, and grades land per
 from __future__ import annotations
 
 import json
+import random
 
 import pytest
 
@@ -93,7 +94,7 @@ def test_grading_stops_when_the_plans_usage_limit_is_reached(tmp_path, monkeypat
     turns.write_text("".join(json.dumps({"prompt_hash": f"h{i}", "prompt": f"p{i}"}) + "\n" for i in range(6)))
     graded_calls = []
 
-    def limited(turn, tiers, judge_model, *, timeout, rng):
+    def limited(turn, tiers, judge_model, *, timeout, rng, **_kw):
         graded_calls.append(turn["prompt_hash"])
         return [{"prompt_hash": turn["prompt_hash"], "prompt": turn["prompt"], "model": m, "score": None,
                  "error": "RuntimeError: claude exited 1: Claude AI usage limit reached|1760000000"}
@@ -109,3 +110,72 @@ def test_the_limit_messages_the_cli_really_prints_are_recognised():
                     "RuntimeError: claude exited 1: API Error: 429 rate limit"):
         assert g._LIMIT.search(message), message
     assert not g._LIMIT.search("RuntimeError: claude exited 1: TimeoutExpired")
+
+
+def test_criteria_rubric_rows_carry_per_criterion_scores_and_the_sandbox_note(monkeypatch):
+    from aar_gateway.grading import rubric
+
+    prompts = []
+
+    class Judge:
+        def __init__(self, model, timeout=None):
+            self.model = model
+
+        def complete(self, prompt, **kw):
+            prompts.append(prompt)
+            if not prompt.startswith("You are grading"):
+                return LLMResponse(content=f"answer from {self.model}", meta={"subscription_cost_usd_equivalent": 0.1})
+            labels = [lab for lab in "ABC" if f"=== Answer {lab} ===" in prompt]
+            body = {lab: {"relevance": 9, "accuracy": 3, "completeness": 8, "conciseness": 7, "consistency": 8,
+                          "balance": None, "uncertainty": None, "hallucinations": ["made-up --flag"],
+                          "overall": 4, "matches_best": False, "reason": "invented flag"} for lab in labels}
+            return LLMResponse(content=json.dumps(body))
+
+    monkeypatch.setattr(g, "ClaudeSubscriptionAdapter", Judge)
+    rows = g.grade_turn({"prompt_hash": "h", "prompt": "fix it"}, ("claude-haiku-5-5", "claude-opus-5-5"),
+                        "claude-sonnet-5-5", timeout=5, rng=random.Random(0), rubric="criteria")
+    assert {r["score"] for r in rows} == {0.4} and rows[0]["criteria"]["accuracy"] == 0.3
+    assert rows[0]["hallucinations"] == ["made-up --flag"] and rows[0]["rubric"] == f"criteria-{rubric.VERSION}"
+    assert "EMPTY scratch folder" in prompts[-1]  # no cwd: the replay ran in an empty folder
+    std = g.grade_turn({"prompt_hash": "h", "prompt": "fix it"}, ("claude-haiku-5-5",), "claude-sonnet-5-5",
+                       timeout=5, rng=random.Random(0))
+    assert std[0]["rubric"] == "standard" and "criteria" not in std[0]
+
+
+def test_two_judgments_are_averaged_each_on_its_own_shuffle(monkeypatch):
+    seen_orders, scores = [], iter([{"answer from claude-haiku-5-5": 2, "answer from claude-opus-5-5": 8},
+                                    {"answer from claude-haiku-5-5": 4, "answer from claude-opus-5-5": 9}])
+
+    class Judge:
+        def __init__(self, model, timeout=None):
+            self.model = model
+
+        def complete(self, prompt, **kw):
+            if not prompt.startswith("You are grading"):
+                return LLMResponse(content=f"answer from {self.model}", meta={"subscription_cost_usd_equivalent": 0.1})
+            import re as _re
+            shown = dict(_re.findall(r"=== Answer (\w) ===\n(answer from [\w-]+)", prompt))
+            seen_orders.append(tuple(shown.values()))
+            want = next(scores)
+            body = {lab: {"score": want[text], "matches_best": want[text] > 5, "reason": "r"} for lab, text in shown.items()}
+            return LLMResponse(content=json.dumps(body), meta={"subscription_cost_usd_equivalent": 0.05})
+
+    monkeypatch.setattr(g, "ClaudeSubscriptionAdapter", Judge)
+    rows = g.grade_turn({"prompt_hash": "h", "prompt": "fix it"}, ("claude-haiku-5-5", "claude-opus-5-5"),
+                        "claude-sonnet-5-5", timeout=5, rng=random.Random(1), judgments=2)
+    by = {r["model"]: r for r in rows}
+    assert by["claude-haiku-5-5"]["score"] == pytest.approx(0.3) and by["claude-haiku-5-5"]["judge_scores"] == [0.2, 0.4]
+    assert by["claude-opus-5-5"]["matches_best"] is True and by["claude-haiku-5-5"]["matches_best"] is False
+    assert by["claude-opus-5-5"]["judge_usage_usd"] == pytest.approx(0.1)
+    assert len(seen_orders) == 2
+
+
+def test_merge_verdicts_tie_counts_as_matching_and_hallucinations_are_unioned():
+    m = g._merge_verdicts([
+        {"score": 0.6, "reason": "a", "matches_best": True, "criteria": {"accuracy": 0.5, "balance": None},
+         "hallucinations": ["x"]},
+        {"score": 0.8, "reason": "b", "matches_best": False, "criteria": {"accuracy": 0.7, "balance": None},
+         "hallucinations": ["x", "y"]}])
+    assert m["score"] == pytest.approx(0.7) and m["matches_best"] is True
+    assert m["criteria"] == {"accuracy": pytest.approx(0.6), "balance": None} and m["hallucinations"] == ["x", "y"]
+    assert g._merge_verdicts([{"score": None, "reason": "", "matches_best": None}])["score"] is None

@@ -1172,6 +1172,10 @@ def router_status() -> dict:
               "models": sorted(_settings.get("models") or {})}
     if _picker is not None and hasattr(_picker, "calibration_status"):
         status["calibration"] = _picker.calibration_status()
+    if rcfg.get("savings_artifact"):
+        # the router that prices lambda turns: its name, or why it isn't serving
+        status["savings"] = {"source": rcfg["savings_artifact"], "name": getattr(_picker, "savings_name", None),
+                             "error": getattr(_picker, "savings_error", None)}
     return status
 
 

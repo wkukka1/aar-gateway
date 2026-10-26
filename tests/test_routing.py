@@ -367,3 +367,57 @@ def test_a_router_file_that_scores_the_tiers_directly_needs_no_proxy(tiers):
     assert decision["model_quality"] == {"claude-opus-5-5": 0.72, "claude-sonnet-5-5": 0.55,
                                          "claude-haiku-5-5": 0.50}
     assert decision["quality_source"] == "router scores the models directly"
+
+
+class SavingsRouter(FakeRouter):
+    """Scores the 5.5 tiers directly, as the judged manifold router does."""
+    model_ids = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    name = "manifold-test"
+
+
+def test_lambda_turns_are_priced_by_the_savings_router(tiers, router):
+    savings = SavingsRouter()
+    savings.scores = {"claude-opus-5-5": 0.72, "claude-sonnet-5-5": 0.71, "claude-haiku-5-5": 0.10}
+    router.scores = HARD   # the margin router would keep Opus here
+    decision = build_picker(tiers, router_model=router, savings_model=savings)(TIER_BODY, tctx(cost_weight=0.2))
+    assert decision["model"] == "claude-sonnet-5-5"
+    assert decision["router"] == "manifold-test"
+
+
+def test_margin_turns_stay_on_the_margin_router(tiers, router):
+    savings = SavingsRouter()
+    savings.scores = {"claude-opus-5-5": 0.30, "claude-sonnet-5-5": 0.29, "claude-haiku-5-5": 0.10}
+    router.scores = HARD
+    decision = build_picker(tiers, router_model=router, savings_model=savings)(TIER_BODY, tctx(quality_margin=0.05))
+    assert decision["model"] == "claude-opus-5-5"
+    assert decision["predicted_quality"] == 0.72
+
+
+def test_lambda_turns_use_the_margin_router_when_there_is_no_savings_router(tiers, router):
+    router.scores = HARD
+    decision = build_picker(tiers, router_model=router)(TIER_BODY, tctx(cost_weight=0.2))
+    assert decision["model"] == "claude-opus-5-5"
+
+
+def test_a_savings_router_that_fails_to_load_is_reported_and_the_margin_router_serves(tiers, router, monkeypatch):
+    from aar_gateway import routing
+
+    def load(path):
+        if path == "margin.npz":
+            return router
+        raise OSError("encoder folder missing")
+
+    monkeypatch.setattr(routing, "_load_file", load)
+    tiers["router"].update(enabled=True, artifact="margin.npz", savings_artifact="savings.npz")
+    pick = build_picker(tiers)
+    assert pick.savings_error == "OSError: encoder folder missing"
+    assert pick.savings_name is None
+    router.scores = HARD
+    assert pick(TIER_BODY, tctx(cost_weight=0.2))["model"] == "claude-opus-5-5"
+
+
+def test_the_bundled_savings_router_is_the_default(tiers):
+    from aar_gateway.config import BUNDLED_SAVINGS_ROUTER
+
+    assert tiers["router"]["savings_artifact"] == str(BUNDLED_SAVINGS_ROUTER)
+    assert BUNDLED_SAVINGS_ROUTER.exists()

@@ -114,10 +114,29 @@ def load_router_model(rcfg: Mapping):
     if not rcfg.get("artifact"):
         raise ValueError("router.enabled needs router.artifact: the path of a router file "
                          "(run `aar-gateway setup` to install one)")
+    return _load_file(rcfg["artifact"])
+
+
+def _load_file(path):
     from ._core.scorers import load_router
     from .config import encoders_dir
 
-    return load_router(rcfg["artifact"], encoders_dir=encoders_dir())
+    return load_router(path, encoders_dir=encoders_dir())
+
+
+def load_savings_model(rcfg: Mapping) -> tuple[object | None, str | None]:
+    """The savings router (``router.savings_artifact``) for lambda-priced turns, as
+    ``(router, error)``. Off when the path is unset. A failure is returned, not raised:
+    the margin router still serves, and lambda turns fall back to it."""
+    if not rcfg.get("savings_artifact"):
+        return None, None
+    try:
+        router = _load_file(rcfg["savings_artifact"])
+        router.route_text(["warm up the encoder"])
+        return router, None
+    except Exception as exc:  # noqa: BLE001 -- a broken savings file must not take the margin router down
+        log.warning("savings router not loaded, lambda turns use the margin router", exc_info=True)
+        return None, f"{type(exc).__name__}: {exc}"[:400]
 
 
 def calibration_offsets(graded_file: Path, router_model, settings: Mapping,
@@ -145,18 +164,24 @@ def calibration_offsets(graded_file: Path, router_model, settings: Mapping,
 
 
 def build_picker(settings: Mapping, router_model=None, graded=None,
-                 graded_file: Path | None = None) -> ModelPicker | None:
+                 graded_file: Path | None = None, savings_model=None) -> ModelPicker | None:
     """``graded`` (:func:`aar_gateway.graded.graded_predictor`): the
     user's own turns graded on the real tiers. When it has enough similar
     prompts it supplies quality directly, with no stand-ins; otherwise the
     benchmark ``router_model`` and each model's ``proxy`` do, each shifted by
-    its :func:`calibration_offsets` from ``graded_file``."""
+    its :func:`calibration_offsets` from ``graded_file``.
+
+    ``savings_model``: the router that scores lambda-priced turns (see
+    :func:`load_savings_model`); with none, those turns use ``router_model``."""
     rcfg = settings["router"]
+    savings_error = None
     if router_model is None:
         if not rcfg.get("enabled"):
             return None
         router_model = load_router_model(rcfg)
         router_model.route_text(["warm up the encoder"])  # first encode is slow
+        if savings_model is None:
+            savings_model, savings_error = load_savings_model(rcfg)
     policy = MarginRoutingPolicy(margin=float(rcfg.get("margin", 0.05)))
     lock = threading.Lock()  # one encoder forward at a time; requests run in a thread pool
     #: ``(graded file mtime, graded prompts, per-model shifts)`` as one tuple, replaced whole,
@@ -193,7 +218,6 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
             offsets()  # known from the start, not only after the first request
     except Exception:  # noqa: BLE001 -- a bad graded file must not stop the picker; pick() retries
         log.warning("could not read the graded file at startup", exc_info=True)
-    pool = set(router_model.model_ids)
     write_mult = WRITE_1H if rcfg.get("cache_ttl", "1h") == "1h" else WRITE_5M
     out_tokens = float(rcfg.get("expected_output_tokens", 800))
 
@@ -257,11 +281,16 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
         ceiling = None if ctx.get("allow_upgrade") else price_for(settings, requested)
         own = graded(ctx["human_text"]) if graded is not None else None
         use_graded = bool(own) and len(own["quality"]) >= 2
+        lam = ctx.get("cost_weight")
+        # lambda turns are priced by the savings router (calibrated for lambda, scores the tiers
+        # directly); margin turns by the margin router, shifted by the user's grades
+        active = savings_model if lam is not None and savings_model is not None else router_model
+        pool = set(active.model_ids)
         shift: dict[str, float] = {}
         if not use_graded:
             with lock:
-                row = router_model.route_text([ctx["human_text"]]).score_frame().iloc[0]
-                shift = offsets()
+                row = active.route_text([ctx["human_text"]]).score_frame().iloc[0]
+                shift = offsets() if active is router_model else {}
         scores, skipped, raw_quality = [], {}, {}
         for model, spec in settings["models"].items():
             price = price_for(settings, model)
@@ -301,7 +330,6 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
             return {"model": ctx["requested"], "reason": "no eligible candidates", "skipped": skipped}
         direct = not use_graded and all(router_column(s.model.model_id, settings["models"][s.model.model_id], pool)
                                         == s.model.model_id for s in scores)
-        lam = ctx.get("cost_weight")
         if lam is not None:
             # lambda on RELATIVE cost: u = q - lam * cost / cost of the dearest eligible
             # model for this request, so one lam means the same on a short and a
@@ -343,10 +371,13 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
                                else "benchmark stand-ins"),
             "quality_margin": policy.margin if ctx.get("quality_margin") is None else ctx["quality_margin"],
             "cost_weight": lam,
+            "router": getattr(active, "name", None),
             "skipped": skipped,
         }
 
     pick.calibration_status = calibration_status
     pick.router_kind = getattr(router_model, "kind", None)  # what actually loaded
     pick.router_name = getattr(router_model, "name", None)  # the file's artifact_id when it has one
+    pick.savings_name = getattr(savings_model, "name", None)
+    pick.savings_error = savings_error  # why the savings router isn't serving, if it was asked for
     return pick
