@@ -222,6 +222,11 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
     out_tokens = float(rcfg.get("expected_output_tokens", 800))
 
     horizon = max(int(rcfg.get("horizon_requests", 20)), 1)
+    #: from this many prompt tokens a conversation is not moved to a cheaper model. Its cache is
+    #: rewritten in full by the move, and the savings assume it stays there. Seen live: 300k-735k
+    #: token conversations moved down and back, paying the rewrite twice, $0.3-$5.9 a turn against
+    #: $0.1-$0.3 on the model asked for. Upgrades and the model already holding the cache are unaffected.
+    long_tokens = int(rcfg.get("long_conversation_tokens", 200_000))
     #: extra predicted-quality gap needed to move a conversation off its
     #: current model. The router's per-prompt scores are noisy; without this a
     #: conversation flip-flops between models turn to turn and every flip
@@ -292,6 +297,7 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
                 row = active.route_text([ctx["human_text"]]).score_frame().iloc[0]
                 shift = offsets() if active is router_model else {}
         scores, skipped, raw_quality = [], {}, {}
+        requested_price = price_for(settings, requested)
         for model, spec in settings["models"].items():
             price = price_for(settings, model)
             proxy = router_column(model, spec, pool)
@@ -305,6 +311,9 @@ def build_picker(settings: Mapping, router_model=None, graded=None,
                     reason = "no price"
                 elif has_price(ceiling) and (price["input"] > ceiling["input"] or price["output"] > ceiling["output"]):
                     reason = "pricier than the requested model"
+                elif (ctx["est_prompt_tokens"] >= long_tokens and model not in (requested, ctx.get("last_model"))
+                      and has_price(requested_price) and price["input"] < requested_price["input"]):
+                    reason = "conversation too long to move to a cheaper model"
             if reason is not None:
                 quality = math.nan
             elif use_graded:

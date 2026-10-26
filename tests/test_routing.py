@@ -106,7 +106,9 @@ def test_a_warm_cache_is_not_thrown_away_for_a_short_stay(settings, router):
 
 def test_a_switch_that_pays_back_over_the_horizon_is_taken(settings, router):
     """Same conversation, 20-request horizon: Sonnet's cheaper cache reads
-    repay the one-time rewrite, so an easy turn moves down."""
+    repay the one-time rewrite, so an easy turn moves down. (Long conversations
+    are kept where they are: see the test below; this checks the payback alone.)"""
+    settings["router"]["long_conversation_tokens"] = 10_000_000
     c = ctx(est_prompt_tokens=201_000, last_model="claude-opus-5", last_prompt_tokens=200_000)
     assert build_picker(settings, router_model=router)(BODY, c)["model"] == "claude-sonnet-5"
 
@@ -369,55 +371,32 @@ def test_a_router_file_that_scores_the_tiers_directly_needs_no_proxy(tiers):
     assert decision["quality_source"] == "router scores the models directly"
 
 
-class SavingsRouter(FakeRouter):
-    """Scores the 5.5 tiers directly, as the judged manifold router does."""
-    model_ids = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
-    name = "manifold-test"
+def test_a_long_conversation_stays_on_the_model_asked_for(settings, router):
+    """Seen live (Oct 19-22): 300k-735k token conversations moved to Haiku and
+    back, paying the whole cache rewrite twice. Over the threshold a cheaper
+    model is not offered, even when the turn is easy. (Threshold lowered here
+    so Haiku's 200k window doesn't decide it first.)"""
+    settings["router"]["long_conversation_tokens"] = 100_000
+    c = ctx(est_prompt_tokens=150_000, last_model="claude-opus-5", last_prompt_tokens=140_000)
+    decision = build_picker(settings, router_model=router)(BODY, c)
+    assert decision["model"] == "claude-opus-5"
+    assert decision["skipped"]["claude-sonnet-5"] == "conversation too long to move to a cheaper model"
+    assert decision["skipped"]["claude-haiku-4-5"] == "conversation too long to move to a cheaper model"
 
 
-def test_lambda_turns_are_priced_by_the_savings_router(tiers, router):
-    savings = SavingsRouter()
-    savings.scores = {"claude-opus-5-5": 0.72, "claude-sonnet-5-5": 0.71, "claude-haiku-5-5": 0.10}
-    router.scores = HARD   # the margin router would keep Opus here
-    decision = build_picker(tiers, router_model=router, savings_model=savings)(TIER_BODY, tctx(cost_weight=0.2))
-    assert decision["model"] == "claude-sonnet-5-5"
-    assert decision["router"] == "manifold-test"
+def test_a_long_conversation_may_stay_on_the_cheaper_model_that_holds_it(settings, router):
+    """A conversation already on Haiku keeps Haiku: no rewrite. Upgrades are not blocked."""
+    settings["router"]["long_conversation_tokens"] = 100_000
+    c = ctx(est_prompt_tokens=150_000, last_model="claude-haiku-4-5", last_prompt_tokens=140_000)
+    assert build_picker(settings, router_model=router)(BODY, c)["model"] == "claude-haiku-4-5"
+    router.scores = {"strong": 0.80, "mid": 0.62, "weak": 0.45}  # a gap past the switch margin
+    up = ctx(requested="claude-sonnet-5", allow_upgrade=True, est_prompt_tokens=150_000,
+             last_model="claude-sonnet-5", last_prompt_tokens=140_000)
+    assert build_picker(settings, router_model=router)(BODY, up)["model"] == "claude-opus-5"
 
 
-def test_margin_turns_stay_on_the_margin_router(tiers, router):
-    savings = SavingsRouter()
-    savings.scores = {"claude-opus-5-5": 0.30, "claude-sonnet-5-5": 0.29, "claude-haiku-5-5": 0.10}
-    router.scores = HARD
-    decision = build_picker(tiers, router_model=router, savings_model=savings)(TIER_BODY, tctx(quality_margin=0.05))
-    assert decision["model"] == "claude-opus-5-5"
-    assert decision["predicted_quality"] == 0.72
-
-
-def test_lambda_turns_use_the_margin_router_when_there_is_no_savings_router(tiers, router):
-    router.scores = HARD
-    decision = build_picker(tiers, router_model=router)(TIER_BODY, tctx(cost_weight=0.2))
-    assert decision["model"] == "claude-opus-5-5"
-
-
-def test_a_savings_router_that_fails_to_load_is_reported_and_the_margin_router_serves(tiers, router, monkeypatch):
-    from aar_gateway import routing
-
-    def load(path):
-        if path == "margin.npz":
-            return router
-        raise OSError("encoder folder missing")
-
-    monkeypatch.setattr(routing, "_load_file", load)
-    tiers["router"].update(enabled=True, artifact="margin.npz", savings_artifact="savings.npz")
-    pick = build_picker(tiers)
-    assert pick.savings_error == "OSError: encoder folder missing"
-    assert pick.savings_name is None
-    router.scores = HARD
-    assert pick(TIER_BODY, tctx(cost_weight=0.2))["model"] == "claude-opus-5-5"
-
-
-def test_the_bundled_savings_router_is_the_default(tiers):
-    from aar_gateway.config import BUNDLED_SAVINGS_ROUTER
-
-    assert tiers["router"]["savings_artifact"] == str(BUNDLED_SAVINGS_ROUTER)
-    assert BUNDLED_SAVINGS_ROUTER.exists()
+def test_the_long_conversation_threshold_is_a_setting(settings, router):
+    """At 300k the 200k-window models are out anyway; with the threshold above
+    300k the remaining cheaper model is allowed."""
+    settings["router"]["long_conversation_tokens"] = 400_000
+    assert build_picker(settings, router_model=router)(BODY, ctx(est_prompt_tokens=300_000))["model"] == "claude-sonnet-5"

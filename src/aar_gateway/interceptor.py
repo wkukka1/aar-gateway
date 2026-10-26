@@ -1547,12 +1547,18 @@ def record_from_mod(report: Mapping) -> dict:
     session = str(report.get("session_id") or "")[:12]
     loop_key = f"{session}:{report.get('agent_id') or 'main'}"
     loop = _mod_loops.get(loop_key) or {}
-    if canonical_model(routed) == canonical_model(asked):
-        warm = loop.get("prompt_tokens", 0) if loop.get("model") and canonical_model(loop["model"]) != canonical_model(asked) else 0
-    else:
-        warm = loop.get("prompt_tokens", 0) if loop.get("model") and canonical_model(loop["model"]) == canonical_model(asked) else 0
+    held = dict(loop.get("held") or {})  # model -> [when it last ran this loop, its prompt tokens]
+    now, previous = time.monotonic(), loop.get("model")
+    switched = canonical_model(routed) != canonical_model(asked) or (
+        previous is not None and canonical_model(previous) != canonical_model(asked))
+    # without the switch the asked model would hold this conversation's prefix from its last
+    # request here -- if that cache is still alive (the proxy's rule: an hour or five minutes).
+    # Crediting it with no time limit made a rewrite after a long gap look like a saving.
+    last = held.get(canonical_model(asked))
+    warm = min(last[1], prompt_tokens(usage)) if switched and last and now - last[0] < _ttl() else 0
     baseline = _warm_usage(usage, warm)
-    _lru_set(_mod_loops, loop_key, {**loop, "model": routed, "prompt_tokens": prompt_tokens(usage),
+    held[canonical_model(routed)] = [now, prompt_tokens(usage)]
+    _lru_set(_mod_loops, loop_key, {**loop, "model": routed, "prompt_tokens": prompt_tokens(usage), "held": held,
                                     "profile": _update_profile(loop.get("profile") or {}, usage)}, _MAX_SESSIONS)
     _global_profile.update(_update_profile(_global_profile, usage))
     strongest = _settings.get("strongest")
