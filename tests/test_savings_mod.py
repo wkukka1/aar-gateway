@@ -39,9 +39,11 @@ def test_the_marketplace_and_plugin_files_are_valid():
 def test_the_mod_only_talks_to_the_local_gateway_and_never_changes_settings():
     code = (MOD / "hooks" / "register.tsx").read_text()
     # its own requests go only to the local gateway; the other two URLs are the source uv
-    # installs the gateway from, and the help link in its "needs uv" message
+    # installs the gateway from, and the help link in its "needs uv" message. The SVG xmlns
+    # in the inline icons is a namespace id, not a request, so it is not a URL here.
     assert "$.http.fetch(GATEWAY + path" in code and code.count("$.http.fetch(") == 1
-    assert set(re.findall(r"https?://[^'\"`\s#]+", code)) == {
+    urls = set(re.findall(r"https?://[^'\"`\s#]+", code)) - {"http://www.w3.org/2000/svg"}
+    assert urls == {
         "http://127.0.0.1:8787", "https://github.com/wkukka1/agentic-llm-router@main", "https://docs.astral.sh/uv/"}
     assert "/api/preferences" not in code and "/v1/messages" not in code and "/api/shutdown" not in code
 
