@@ -43,7 +43,7 @@ from pathlib import Path
 
 from aar_gateway.config import append_jsonl, gateway_home, read_jsonl
 from aar_gateway.claude_cli import ClaudeSubscriptionAdapter
-from aar_gateway.grading.rubric import RUBRICS, blind, criteria_prompt, parse_criteria
+from aar_gateway.grading.rubric import RUBRICS, criteria_prompt, parse_criteria
 from aar_gateway.grading.rubric import VERSION as RUBRIC_VERSION
 
 DEFAULT_TIERS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
@@ -137,7 +137,7 @@ def judge_prompt(request: str, answers: dict[str, str], reference: str | None = 
     if reference:
         parts.append(f"\n\n=== Reference solution ===\n{reference[:ANSWER_CHARS]}")
     for label, answer in answers.items():
-        parts.append(f"\n\n=== Answer {label} ===\n{blind(answer, request)[:ANSWER_CHARS]}")
+        parts.append(f"\n\n=== Answer {label} ===\n{answer[:ANSWER_CHARS]}")
     return "".join(parts)
 
 

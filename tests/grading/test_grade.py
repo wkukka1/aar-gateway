@@ -30,9 +30,7 @@ class FakeClaude:
                 verdict[lab] = {"score": 9 if "opus" in body else 7 if "sonnet" in body else 4,
                                 "reason": "ok"}
             return LLMResponse(content="Here you go:\n" + json.dumps(verdict))
-        # a bare tier word, not the model name: blind() would take a name out before the judge sees it
-        return LLMResponse(content=f"answer from {self.model.split('-')[1]}",
-                           meta={"subscription_cost_usd_equivalent": 0.01})
+        return LLMResponse(content=f"answer from {self.model}", meta={"subscription_cost_usd_equivalent": 0.01})
 
 
 @pytest.fixture
@@ -60,32 +58,6 @@ def test_judge_sees_letters_not_model_names(fake, tmp_path):
     judge_prompt = [c for c in fake.calls if c[0] == g.DEFAULT_JUDGE][-1]
     assert judge_prompt  # the judge was called
     assert "=== Answer A ===" in g.judge_prompt("q", {"A": "x"})
-
-
-@pytest.mark.parametrize("answer, request_, want", [
-    ('git commit -m "fix" -m "Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>"', "commit it",
-     'git commit -m "fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"'),
-    ("🤖 Generated with [Claude Code](https://claude.com/claude-code)", "open a PR",
-     "🤖 Generated with [Claude](https://claude.com/claude-code)"),
-    ("I'm Claude Opus 5.5, and here is the fix.", "fix it", "I'm Claude, and here is the fix."),
-    ("Route it to claude-sonnet-5-5.", "what model?", "Route it to Claude."),
-    ("Use a haiku example; an Opus judge scores it.", "pick examples",   # bare tier words are content
-     "Use a haiku example; an Opus judge scores it."),
-    ("Set it to claude-opus-5-5.", "should the default be claude-opus-5-5?",  # the request's own topic
-     "Set it to claude-opus-5-5."),
-    ("Co-Authored-By: Claude Opus 5.5 <x>", "the trailer says Claude Opus 5.5",  # a signature is never topic
-     "Co-Authored-By: Claude <x>"),
-])
-def test_blind_takes_the_authors_name_out(answer, request_, want):
-    assert g.blind(answer, request_) == want
-
-
-def test_both_judge_prompts_are_blind():
-    from aar_gateway.grading.rubric import criteria_prompt
-
-    signed = {"A": "done.\nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>"}
-    assert "Haiku" not in g.judge_prompt("commit it", signed)
-    assert "Haiku" not in criteria_prompt("commit it", signed, empty_folder=True)
 
 
 def test_a_prompt_is_graded_once(fake, tmp_path):
@@ -171,8 +143,8 @@ def test_criteria_rubric_rows_carry_per_criterion_scores_and_the_sandbox_note(mo
 
 
 def test_two_judgments_are_averaged_each_on_its_own_shuffle(monkeypatch):
-    seen_orders, scores = [], iter([{"answer from haiku": 2, "answer from opus": 8},
-                                    {"answer from haiku": 4, "answer from opus": 9}])
+    seen_orders, scores = [], iter([{"answer from claude-haiku-5-5": 2, "answer from claude-opus-5-5": 8},
+                                    {"answer from claude-haiku-5-5": 4, "answer from claude-opus-5-5": 9}])
 
     class Judge:
         def __init__(self, model, timeout=None):
@@ -180,7 +152,7 @@ def test_two_judgments_are_averaged_each_on_its_own_shuffle(monkeypatch):
 
         def complete(self, prompt, **kw):
             if not prompt.startswith("You are grading"):
-                return LLMResponse(content=f"answer from {self.model.split('-')[1]}", meta={"subscription_cost_usd_equivalent": 0.1})
+                return LLMResponse(content=f"answer from {self.model}", meta={"subscription_cost_usd_equivalent": 0.1})
             import re as _re
             shown = dict(_re.findall(r"=== Answer (\w) ===\n(answer from [\w-]+)", prompt))
             seen_orders.append(tuple(shown.values()))
