@@ -176,10 +176,26 @@ def test_claude_code_is_given_the_roles_unless_the_user_brings_their_own(monkeyp
     monkeypatch.setenv("AAR_GATEWAY_STATUSLINE", "0")
     args, _ = cli._claude_command("http://127.0.0.1:8787", [])
     assert json.loads(args[args.index("--agents") + 1]) == agent_definitions()
+    assert args[args.index("--append-system-prompt") + 1] == cli._DELEGATE_NOTE
     args, _ = cli._claude_command("http://127.0.0.1:8787", ["--agents", "{}"])
     assert args.count("--agents") == 1
     monkeypatch.setenv("AAR_GATEWAY_AGENTS", "0")
     assert "--agents" not in cli._claude_command("http://127.0.0.1:8787", [])[0]
+
+
+def test_plain_claude_gets_the_delegation_note_in_claude_md_until_disable(tmp_path):
+    md = tmp_path / "CLAUDE.md"
+    md.write_text("# My notes\n\nUse uv.\n")
+    cli._note_file_set(md)
+    cli._note_file_set(md)  # enabling again replaces the block, not a second copy
+    text = md.read_text()
+    assert text.count(cli._DELEGATE_NOTE) == 1 and text.startswith("# My notes\n\nUse uv.\n")
+    cli._note_file_clear(md)
+    assert md.read_text() == "# My notes\n\nUse uv.\n"
+    solo = tmp_path / "only.md"
+    cli._note_file_set(solo)
+    cli._note_file_clear(solo)
+    assert not solo.exists()
 
 
 def test_agents_install_writes_files_and_keeps_existing_ones(tmp_path, capsys):

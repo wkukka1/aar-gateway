@@ -643,8 +643,9 @@ def _setup(router: str | None, force: bool, enable: bool | None = False, share: 
         print("every `claude` session already goes through the gateway (`aar-gateway stop` to undo)")
     elif enable is None and sys.stdin.isatty():
         # opt in: only a yes changes Claude Code's settings
-        answer = input("Use the gateway in every Claude Code session? (`aar-gateway stop` undoes it)\n"
-                       "[y/N] ")
+        answer = input("Use the gateway in every Claude Code session? This routes all requests through the router\n"
+                       "and tells the main agent it can delegate searches, checks and changes to subagents.\n"
+                       "(`aar-gateway stop` undoes it) [y/N] ")
         enable = answer.strip().lower() in ("y", "yes")
     if enable and not auto_enabled():
         try:
@@ -997,8 +998,18 @@ def _claude_command(url: str, claude_args: list[str]) -> tuple[list[str], dict]:
     if os.environ.get("AAR_GATEWAY_AGENTS", "1") != "0" and "--agents" not in claude_args:
         from .subagents import agent_definitions
 
-        args += ["--agents", json.dumps(agent_definitions())]
+        args += ["--agents", json.dumps(agent_definitions()),
+                 "--append-system-prompt", _DELEGATE_NOTE]
     return args + claude_args, env
+
+
+#: told to the main agent with the kinds: split off independent work and send
+#: searches and checks to a kind, so its own context stays on the task
+_DELEGATE_NOTE = ("You can hand work to subagents. When a piece of the task is independent of the rest "
+                  "-- a search, a count, a check, or a self-contained change -- start a subagent for it "
+                  "with the Agent tool and a kind from your list (lookup for searches and checks, make for "
+                  "changes and tests, judge for hard root-cause questions), then continue with the rest. "
+                  "Keep small or sequential steps in this session.")
 
 
 # --------------------------------------------------------------------------- #
@@ -1159,6 +1170,7 @@ def _enable(force: bool = False) -> int:
     with _settings_lock(path):
         _enable_settings(path, url, force)
     print(f"plain `claude` now goes through the gateway in every session ({path})")
+    _note_file_set(path.with_name("CLAUDE.md"))
     _agents(["--install"])
     if sys.platform == "darwin" or sys.platform.startswith("linux"):
         try:
@@ -1279,11 +1291,44 @@ def _disable() -> int:
     path = _claude_settings_path()
     with _settings_lock(path):
         _disable_settings(path)
+    _note_file_clear(path.with_name("CLAUDE.md"))
     if sys.platform == "darwin" or sys.platform.startswith("linux"):
         _service("uninstall")
     _mod_remove()
     print("every `claude` session talks to Anthropic directly again (`aar-gateway start` turns it back on)")
     return 0
+
+
+#: the delegation note in the user's CLAUDE.md, between markers so disable can take it out
+_NOTE_BEGIN, _NOTE_END = "<!-- aar-gateway:begin -->", "<!-- aar-gateway:end -->"
+
+
+def _note_without(text: str) -> str:
+    """``text`` with the gateway's block taken out (its own markers only)."""
+    start = text.find(_NOTE_BEGIN)
+    end = text.find(_NOTE_END, start) if start >= 0 else -1
+    if end < 0:
+        return text
+    head, tail = text[:start].rstrip(), text[end + len(_NOTE_END):].lstrip("\n")
+    return "\n\n".join(part for part in (head, tail) if part) + ("\n" if head or tail else "")
+
+
+def _note_file_set(path: Path) -> None:
+    """Puts :data:`_DELEGATE_NOTE` in ``path`` (CLAUDE.md), replacing an older block."""
+    text = _note_without(path.read_text(encoding="utf-8") if path.exists() else "")
+    block = f"{_NOTE_BEGIN}\n{_DELEGATE_NOTE}\n{_NOTE_END}\n"
+    _write_file(path, "\n\n".join(part for part in (text.rstrip(), block) if part))
+
+
+def _note_file_clear(path: Path) -> None:
+    """Takes the gateway's block out of ``path``; the file goes if nothing else is in it."""
+    if not path.exists():
+        return
+    text = _note_without(path.read_text(encoding="utf-8"))
+    if text.strip():
+        _write_file(path, text)
+    else:
+        path.unlink()
 
 
 def _disable_settings(path: Path) -> None:
