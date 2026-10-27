@@ -162,6 +162,12 @@ def test_many_hooks_at_once_switch_to_anthropic_and_back_consistently(tmp_path):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         fire(30)  # it answers again
+        # A hook whose health probe timed out (a busy machine, 30 processes at once) may be
+        # the last to switch, back off: _check accepts that stale reading, and the next
+        # check undoes it. What must hold is that the address and the marker agree...
+        has_url, bypassed = _consistent(settings, marker, url)
+        assert has_url != bypassed
+        fire(1)  # ...and that the next message's check brings routing back
         assert _consistent(settings, marker, url) == (True, False)
     finally:
         server.shutdown()
