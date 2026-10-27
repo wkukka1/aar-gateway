@@ -373,7 +373,7 @@ const ARROW = '<svg class="arr" width="14" height="14" viewBox="0 0 24 24" fill=
 const CHEV = (d) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
 const PRESET_NOTES = {best_quality: "Stays on the stronger model unless a cheaper one is almost as good",
   balanced: "Cheaper models when they're predicted close in quality (default)",
-  save_more: "Prefers cheaper models more often; gives up a little more quality"};
+  save_more: "Prefers cheaper models more often, scored by the savings router; gives up a little more quality"};
 const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
 let prefs = null, recent = [], page = 0, seen = null, lastTables = {};
 
@@ -472,15 +472,18 @@ function renderPrefs() {
   const lam = prefs.cost_weight;
   let preset = null;
   document.querySelectorAll("[data-preset]").forEach((b) => {
-    const on = prefs.mode === "auto" && lam == null && prefs.presets[b.dataset.preset] === m;
+    const savings = (prefs.savings_presets || {})[b.dataset.preset];
+    const on = prefs.mode === "auto" && (savings ? lam === prefs.cost_presets[savings]
+      : lam == null && prefs.presets[b.dataset.preset] === m);
     if (on) preset = b.dataset.preset;
     b.classList.toggle("on", on);
     b.setAttribute("aria-pressed", on);
   });
   $("preset-note").textContent = prefs.mode !== "auto"
     ? `Routing is ${prefs.mode === "off" ? "off" : "pinned to " + short(prefs.pinned_model)} (Advanced settings)`
+    : preset ? PRESET_NOTES[preset]
     : lam != null ? `Cost weight λ ${lam.toFixed(2)} (Advanced settings)`
-    : (preset ? PRESET_NOTES[preset] : `Custom margin ${m.toFixed(2)} (Advanced settings)`);
+    : `Custom margin ${m.toFixed(2)} (Advanced settings)`;
   $("pref-note").textContent = prefs.router_enabled ? ""
     : prefs.router_error ? `Router failed to load, so requests go through unrouted: ${prefs.router_error}`
     : "The router is off in the gateway config";
@@ -654,8 +657,7 @@ function connect() {
 
 document.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", async () => {
   if (prefs && prefs.mode !== "auto") await setPref({mode: "auto"});
-  if (prefs && prefs.cost_weight != null) await setPref({cost_weight: null});  // a margin preset means the margin rule
-  setPref({preset: b.dataset.preset});
+  setPref({preset: b.dataset.preset});  // the gateway sets a margin or, for Save more, the savings router's λ
 }));
 document.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () =>
   setPref({mode: b.dataset.mode, pinned_model: b.dataset.mode === "pin" ? $("pin-model").value : undefined})));

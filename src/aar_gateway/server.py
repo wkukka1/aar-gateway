@@ -252,7 +252,7 @@ async def update_preferences(request: Request):
         if body.get("preset") is not None:
             if body["preset"] not in interceptor.PRESETS:
                 raise HTTPException(400, f"unknown preset {body['preset']!r}")
-            margin = interceptor.PRESETS[body["preset"]]
+            return interceptor.apply_preset(body["preset"])
         if margin is None:
             raise HTTPException(400, "send quality_margin or preset")
         return interceptor.set_quality_margin(margin)

@@ -195,13 +195,28 @@ def test_cost_preference_is_saved_and_reaches_the_router(env, tmp_path):
     client, settings, _, _ = env
     seen = []
     interceptor.configure(settings, lambda body, ctx: seen.append(ctx["quality_margin"]))
-    save_more = interceptor.PRESETS["save_more"]
-    assert client.post("/api/preferences", json={"preset": "save_more"}).json()["quality_margin"] == save_more
-    assert json.loads((tmp_path / "preferences.json").read_text())["quality_margin"] == save_more
+    best = interceptor.PRESETS["best_quality"]
+    assert client.post("/api/preferences", json={"preset": "best_quality"}).json()["quality_margin"] == best
+    assert json.loads((tmp_path / "preferences.json").read_text())["quality_margin"] == best
     client.post("/v1/messages", json=turn("a"), headers=AUTH)
     client.post("/v1/messages", json=turn("b"), headers={**AUTH, interceptor.MARGIN_HEADER: "0.02"})
-    assert seen == [save_more, 0.02]
+    assert seen == [best, 0.02]
     assert client.post("/api/preferences", json={"quality_margin": 2}).status_code == 400
+
+
+def test_save_more_prices_turns_on_the_savings_router(env, tmp_path):
+    client, settings, _, _ = env
+    seen = []
+    interceptor.configure(settings, lambda body, ctx: seen.append(ctx["cost_weight"]))
+    lam = interceptor.COST_PRESETS["save_more"]
+    prefs = client.post("/api/preferences", json={"preset": "save_more"}).json()
+    assert prefs["cost_weight"] == lam and prefs["savings_presets"] == {"save_more": "save_more"}
+    assert json.loads((tmp_path / "preferences.json").read_text())["cost_weight"] == lam
+    client.post("/v1/messages", json=turn("a"), headers=AUTH)
+    assert seen == [lam]
+    # a margin preset goes back to the quality router: lambda off
+    prefs = client.post("/api/preferences", json={"preset": "balanced"}).json()
+    assert prefs["cost_weight"] is None and prefs["quality_margin"] == interceptor.PRESETS["balanced"]
 
 
 def test_dashboard_page_is_served(env):

@@ -43,13 +43,14 @@ The gateway serves two router files, and the cost preference decides which one p
 
 | Turn priced by | Router | Config key | Calibrated for |
 |---|---|---|---|
-| Quality margin: Best quality, Balanced or Save more | `llmrouterbench-mlp` (default) | `router.artifact` | Better quality: the trained network, read through each tier's `proxy` |
-| Cost weight λ: the λ presets, or `x-aar-cost-weight` | `manifold-nirt-claude-judged` (default) | `router.savings_artifact` | Most savings: scores the Claude tiers directly |
+| Quality margin: Best quality or Balanced | `llmrouterbench-mlp` (default) | `router.artifact` | Better quality: the trained network, read through each tier's `proxy` |
+| Cost weight λ: the dashboard's Save more, the λ presets, or `x-aar-cost-weight` | `manifold-nirt-claude-judged` (default) | `router.savings_artifact` | Most savings: scores the Claude tiers directly |
 
 * A turn with λ set is priced by the savings router. A turn on the margin is priced by the
   margin router. One turn never mixes the two: their predicted qualities are on different scales.
-* The dashboard's **Save more** preset is a margin, so it stays on the margin router. For the
-  manifold's savings, use a λ preset: `cost_preset` `balanced` or `save_more` (Advanced settings → Cost weight).
+* The dashboard's **Save more** preset sets λ to the `save_more` preset (0.3), so it is priced by
+  the savings router; **Best quality** and **Balanced** are margins and switch λ off. The other
+  λ presets are under Advanced settings → Cost weight (`cost_preset` `quality` or `balanced`).
 * When the user's own grades cover a prompt, quality comes from those grades under either rule
   (`quality_source: graded`), as before.
 * If the savings file can't load (for example, its BERT encoder folder is missing), λ turns use the
@@ -302,7 +303,10 @@ router (the kNN router's figures in brackets):
 |---|---|---|---|
 | Best quality | 0.01 | 0.626 (0.615) | $26.52, −6% ($24.40, −14%) |
 | Balanced (default) | 0.05 | 0.612 (0.596) | $19.79, −30% ($17.25, −39%) |
-| Save more | 0.08 | 0.590 (0.580) | $14.82, −48% ($12.06, −57%) |
+| margin 0.08 (the old Save more) | 0.08 | 0.590 (0.580) | $14.82, −48% ($12.06, −57%) |
+
+The dashboard's **Save more** is no longer a margin: it sets λ on the savings router (see
+[Two routers](#two-routers-quality-and-savings)). A margin of 0.08 can still be set by number.
 
 `0` (always the top prediction) is allowed, but on the benchmark it cost
 *more* than always using GPT-5 for no measurable gain.
@@ -311,7 +315,7 @@ Three ways to set it:
 
 * **From the dashboard.** Saved in `~/.aar-gateway/preferences.json` and kept
   across restarts.
-* **With `POST /api/preferences`**, sending `{"preset": "save_more"}` or
+* **With `POST /api/preferences`**, sending `{"preset": "balanced"}` or
   `{"quality_margin": 0.1}`.
 * **For one Claude Code session only**, with a header:
 
@@ -389,7 +393,7 @@ change. The decision log then shows `quality_source: router scores the models di
 
 * **Plan usage** against no router and against always the strongest model,
   with requests per minute over the last 30 minutes.
-* **Cost preference**: Best quality, Balanced (the default) or Save more.
+* **Cost preference**: Best quality, Balanced (the default) or Save more (the savings router).
 * **Your sessions**: each Claude Code session's cost, what it would have cost
   on the models it asked for, and the saving.
 * **Recent requests**, 12 a page: the model asked for and the one that

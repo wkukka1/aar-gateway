@@ -296,6 +296,21 @@ COST_WEIGHT_HEADER = "x-aar-cost-weight"
 #: (investigations/profile_manifold/judge_finetune_cv_group.json). Other router files
 #: predict on other scales: re-measure before relying on these with them.
 COST_PRESETS = {"quality": 0.02, "balanced": 0.2, "save_more": 0.3}
+#: dashboard presets priced by the savings router: preset name -> its COST_PRESETS lambda.
+#: The others in PRESETS are margins on the quality router (their margin is kept as a
+#: fallback for a turn the savings router can't price).
+SAVINGS_PRESETS = {"save_more": "save_more"}
+
+
+def apply_preset(name: str) -> dict:
+    """A dashboard cost preset: a lambda on the savings router (SAVINGS_PRESETS) or a
+    margin on the quality router, which switches lambda off."""
+    if name not in PRESETS:
+        raise KeyError(name)
+    if name in SAVINGS_PRESETS:
+        return set_cost_weight(COST_PRESETS[SAVINGS_PRESETS[name]])
+    set_cost_weight(None)
+    return set_quality_margin(PRESETS[name])
 
 
 def preferences() -> dict:
@@ -304,6 +319,7 @@ def preferences() -> dict:
     defaults = {**DEFAULT_ROLE_MODELS, **_config_roles}
     return {"quality_margin": _settings["router"]["margin"], "presets": PRESETS,
             "cost_weight": _settings["router"].get("cost_weight"), "cost_presets": COST_PRESETS,
+            "savings_presets": SAVINGS_PRESETS,
             "cost_weight_header": COST_WEIGHT_HEADER,
             "router_enabled": _picker is not None, "router_error": _router_error,
             "strongest_model": _settings.get("strongest"),

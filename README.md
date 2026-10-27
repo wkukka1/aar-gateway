@@ -35,8 +35,8 @@ Two bundled router files. The cost preference picks which one prices each turn:
 
 | Cost preference | Router | Config key | Tuned for |
 |---|---|---|---|
-| Quality margin: Best quality, Balanced (the default), Save more | `llmrouterbench-mlp` | `router.artifact` | Better quality |
-| Cost weight λ (the λ presets, `cost_preset` / `x-aar-cost-weight`) | `manifold-nirt-claude-judged` | `router.savings_artifact` | Most savings |
+| Quality margin: Best quality, Balanced (the default) | `llmrouterbench-mlp` | `router.artifact` | Better quality |
+| Cost weight λ (the dashboard's Save more, the λ presets, `cost_preset` / `x-aar-cost-weight`) | `manifold-nirt-claude-judged` | `router.savings_artifact` | Most savings |
 
 What they measured, each against its own baseline:
 
