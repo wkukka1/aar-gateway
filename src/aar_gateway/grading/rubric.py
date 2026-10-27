@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable
 
 #: (key, what the judge checks); balance and uncertainty may be null when the request has no such side
@@ -38,6 +39,21 @@ CRITERIA = (
                     "it say so or ask, instead of guessing with confidence? null if nothing was uncertain."),
 )
 OPTIONAL = ("balance", "uncertainty")
+
+#: a Claude model named with its tier and version ("Claude Haiku 5.5", "claude-opus-5-5", "Sonnet 5.5");
+#: a bare tier word ("a haiku", "an Opus judge") is content and stays
+_MODEL_NAME = re.compile(r"\bclaude[- ](?:opus|sonnet|haiku|fable)(?:[- ]\d+(?:[.-]\d+)*)?\b"
+                         r"|\b(?:opus|sonnet|haiku|fable)[- ]\d+(?:[.-]\d+)*\b", re.I)
+_SIGNATURE = re.compile(r"(co-authored-by:\s*|generated with \[?)[^<\n\"'\]]*?(?=\s*[<\n\"'\]]|\s*$)", re.I)
+
+
+def blind(answer: str, request: str) -> str:
+    """``answer`` with its author's name taken out, so the judge can't tell which tier wrote it:
+    commit trailers ("Co-Authored-By: Claude Haiku 5.5") always lose the name, and any other
+    versioned model name does unless the request itself uses it (then it is the topic)."""
+    answer = _SIGNATURE.sub(lambda m: m.group(1) + "Claude", answer)
+    topic = {m.group(0).lower() for m in _MODEL_NAME.finditer(request)}
+    return _MODEL_NAME.sub(lambda m: m.group(0) if m.group(0).lower() in topic else "Claude", answer)
 
 #: where the answers were produced, so the judge doesn't read the sandbox as a hallucination
 ENV_EMPTY = """Each assistant answered in a read-only planning mode inside an EMPTY scratch folder: it could not
@@ -85,7 +101,7 @@ def criteria_prompt(request: str, answers: dict[str, str], *, empty_folder: bool
     parts = [head, f"\n\n{reference_note}" if reference else "", f"\n\n=== Developer request ===\n{request}"]
     if reference:
         parts.append(f"\n\n=== Reference solution ===\n{reference[:answer_chars]}")
-    parts += [f"\n\n=== Answer {lab} ===\n{text[:answer_chars]}" for lab, text in answers.items()]
+    parts += [f"\n\n=== Answer {lab} ===\n{blind(text, request)[:answer_chars]}" for lab, text in answers.items()]
     return "".join(parts)
 
 
