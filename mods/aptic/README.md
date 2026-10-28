@@ -59,8 +59,11 @@ Only these, and only when needed:
   computer, `http://127.0.0.1:8787`. It never contacts any other host. It
   takes no commands from the router: the router's answers are only model
   names and numbers to show.
-* uv downloads the router package from GitHub (`github.com/wkukka1/aar-gateway`)
-  and its dependencies from PyPI, the first time `uvx` runs it.
+* Two downloads, which send none of your data:
+  * uv downloads the router package from GitHub (`github.com/wkukka1/aar-gateway`)
+    and its dependencies from PyPI, the first time `uvx` runs it.
+  * The router downloads its embedding model (`sentence-transformers/all-MiniLM-L6-v2`)
+    from Hugging Face the first time it routes a message, then uses its cached copy.
 * What goes to the local router:
   * `/api/route`: the message you typed, the model you chose, the session id,
     and whether the session was resumed. The router picks this turn's model.
@@ -104,7 +107,9 @@ Only these, and only when needed:
 
 Aptic has no server. Everything it sends goes to the router running on your
 own computer (`127.0.0.1:8787`), and nothing is uploaded: the plugin starts the
-router with usage sharing turned off.
+router with usage sharing turned off. The only other connections are the
+downloads of the router and its embedding model, from GitHub, PyPI and Hugging
+Face (see above).
 
 * **What it reads:** each message you type, to pick its model, and each
   request's token counts. It doesn't look for personal data, but a message you
