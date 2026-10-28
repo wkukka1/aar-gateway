@@ -13,6 +13,13 @@ Claude Code ──► gateway (127.0.0.1:8787) ──► router picks a model fo
 
 ## Install
 
+The lightest way is the Claude Code plugin, Aptic. In Claude Code run
+`/plugin install aptic --marketplace wkukka1/aar-gateway`, then start a new session. The plugin starts
+the gateway itself with uv; nothing else is installed and no settings change. See
+[mods/aptic](mods/aptic/README.md).
+
+As a standalone gateway (a proxy for every Claude Code session):
+
 ```bash
 uv tool install git+https://github.com/wkukka1/aar-gateway
 aar-gateway setup        # installs the bundled router file and writes ~/.aar-gateway/config.yaml

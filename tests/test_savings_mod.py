@@ -22,7 +22,7 @@ def real_plugin_functions(monkeypatch):
     monkeypatch.setattr(cli, "_mod_remove", _REMOVE)
     monkeypatch.setattr(cli, "_mod_installed", _INSTALLED)
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 MOD = ROOT / "mods" / "aptic"
 
 
@@ -44,7 +44,7 @@ def test_the_mod_only_talks_to_the_local_gateway_and_never_changes_settings():
     assert "$.http.fetch(GATEWAY + path" in code and code.count("$.http.fetch(") == 1
     urls = set(re.findall(r"https?://[^'\"`\s#]+", code)) - {"http://www.w3.org/2000/svg"}
     assert urls == {
-        "http://127.0.0.1:8787", "https://github.com/wkukka1/agentic-llm-router@main", "https://docs.astral.sh/uv/"}
+        "http://127.0.0.1:8787", "https://github.com/wkukka1/aar-gateway@main", "https://docs.astral.sh/uv/"}
     assert "/api/preferences" not in code and "/v1/messages" not in code and "/api/shutdown" not in code
 
 
@@ -73,7 +73,7 @@ def claude(monkeypatch):
 
 def test_install_adds_the_marketplace_then_the_plugin_at_user_scope(claude):
     assert cli._mod_install() is True
-    assert ["plugin", "marketplace", "add", "wkukka1/agentic-llm-router"] in claude.calls
+    assert ["plugin", "marketplace", "add", "wkukka1/aar-gateway"] in claude.calls
     assert ["plugin", "install", "aptic@deuce-labs", "--scope", "user"] in claude.calls
 
 

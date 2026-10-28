@@ -1218,7 +1218,7 @@ def _enable_settings(path: Path, url: str, force: bool) -> None:
 
 MOD_QUESTION = ("Show your gateway savings inside Claude Code too? This adds a Claude Code plugin that reads the "
                 "local gateway's numbers (read-only) and shows them on the status line. [y/N] ")
-MOD_MARKETPLACE = "wkukka1/agentic-llm-router"
+MOD_MARKETPLACE = "wkukka1/aar-gateway"
 MOD_PLUGIN = "aptic@deuce-labs"
 MOD_MIN_VERSION = (2, 1, 287)  # Claude Code mods (plugins that run code inside a session)
 
