@@ -100,6 +100,29 @@ Only these, and only when needed:
 * Turn routing off in `/config` ("Route in Claude Code") and `turn.start` and
   `agent.spawn` pass everything on unchanged.
 
+## Privacy
+
+Aptic has no server. Everything it sends goes to the router running on your
+own computer (`127.0.0.1:8787`), and nothing is uploaded: the plugin starts the
+router with usage sharing turned off.
+
+* **What it reads:** each message you type, to pick its model, and each
+  request's token counts. It doesn't look for personal data, but a message you
+  type may contain some.
+* **What is kept, and where:** the router logs each request's model, token
+  counts, session id and cost in `~/.aar-gateway` on your computer. Old logs are
+  compressed, not deleted; they stay until you delete that folder. No message
+  text is kept for the plugin's requests.
+* **If you also turn on the proxy** (`aar-gateway enable`, not something the
+  plugin does): the proxy keeps an on-device history of the messages you type
+  in `~/.aar-gateway/history`, never uploaded. `aar-gateway history off` stops it
+  and `aar-gateway history delete` removes it.
+* **Sharing is opt-in:** only if you turn it on yourself (`aar-gateway setup`
+  asks; `aar-gateway share on|off`; the plugin never does) does the router
+  upload anonymous routing records: models, token counts, cost, and a coarse
+  compressed embedding of each message, never its text, file paths or session
+  ids. `aar-gateway share show` prints what would be sent.
+
 Source and tests: https://github.com/wkukka1/aar-gateway
 
 The measurements behind the numbers:
