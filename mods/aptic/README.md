@@ -35,13 +35,70 @@ In Claude Code:
 
 ## What it does on your machine
 
-* Starts the router (a local process on `127.0.0.1:8787`) when it isn't running,
-  with `uvx`, from this repository; first run writes `~/.aar-gateway/config.yaml`
-  and the router file. Nothing else is installed and no settings are changed.
-* Sends your typed message to that local process to pick a model, and reports
-  each request's token counts to it so it can show savings. Nothing leaves your
-  computer; no prompt text is stored.
-* If the router isn't answering, every request goes to the model you asked for.
+Nothing else is installed and no settings are changed. If the router isn't
+answering, every request goes to the model you asked for.
+
+### Programs it runs
+
+Only these, and only when needed:
+
+* `uvx --from "aar-gateway @ git+https://github.com/wkukka1/aar-gateway@main" aar-gateway setup --no-enable --no-share --no-mod`,
+  once, when `~/.aar-gateway/config.yaml` doesn't exist yet: writes that config
+  file and the router file, and changes nothing else.
+* `uvx --from "…same…" aar-gateway start --quiet`, when the router isn't
+  answering: starts it as a background process on `127.0.0.1:8787`.
+  If `uvx` isn't on `PATH`, it tries `~/.local/bin/uvx`, where uv installs itself.
+* Your system's URL opener, with the fixed address
+  `http://127.0.0.1:8787/dashboard`, only when you press the pane's dashboard
+  button: `rundll32 url.dll,FileProtocolHandler` on Windows, `open` on macOS,
+  `xdg-open` on Linux.
+
+### What it fetches and sends, and where
+
+* The plugin itself makes requests to one host only: the router on your own
+  computer, `http://127.0.0.1:8787`. It never contacts any other host. It
+  takes no commands from the router: the router's answers are only model
+  names and numbers to show.
+* uv downloads the router package from GitHub (`github.com/wkukka1/aar-gateway`)
+  and its dependencies from PyPI, the first time `uvx` runs it.
+* What goes to the local router:
+  * `/api/route`: the message you typed, the model you chose, the session id,
+    and whether the session was resumed. The router picks this turn's model.
+  * `/api/subagent-spawn`: a subagent's type, its prompt and its model. The
+    router picks the subagent's model.
+  * `/api/mod-record`: each request's model and token counts (input, output,
+    cache read, cache write), for the savings numbers. No prompt or answer text.
+  * `/health`, `/stats`, `/api/session-requests`: reads only, for the pane and
+    the status line.
+* For the plugin's requests the router keeps no prompt text; it logs models and
+  token counts in `~/.aar-gateway`. (If you also turn on its proxy with
+  `aar-gateway enable`, the proxy keeps an on-device history of the messages
+  you type in `~/.aar-gateway/history`, never uploaded; `aar-gateway history off`
+  stops it and `aar-gateway history delete` removes it.)
+* The plugin starts the router with usage sharing off (`--no-share`), so
+  nothing is uploaded.
+
+### What it reads
+
+* The conversation: the text of each message you type (to route it) and each
+  request's token usage (for the savings).
+* Environment variables `HOME` / `USERPROFILE` (to find `~/.aar-gateway` and
+  `uvx`), `OS` (to pick the URL opener) and `ANTHROPIC_BASE_URL` (to tell
+  whether this session already goes through the router's proxy). None of
+  them is sent anywhere.
+
+### Hooks and what they do with what they see
+
+* `turn.start`: asks the local router for this turn's model and switches the
+  turn to it. Nothing else about the turn changes.
+* `agent.spawn`: replaces only the subagent's `model` with the one the router
+  picks. Its tools, prompt and permission mode stay as Claude Code set them,
+  and your permission rules and prompts still decide every tool use. The
+  plugin answers no permission checks.
+* `turn.step`, `turn.complete`: read token usage and add one line under the
+  answer naming the model that answered.
+* Turn routing off in `/config` ("Route in Claude Code") and `turn.start` and
+  `agent.spawn` pass everything on unchanged.
 
 Source and tests: https://github.com/wkukka1/aar-gateway
 

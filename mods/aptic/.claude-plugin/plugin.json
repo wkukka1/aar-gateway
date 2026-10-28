@@ -1,7 +1,7 @@
 {
   "name": "aptic",
   "displayName": "Aptic",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Aptic picks the cheapest Claude model that can handle each turn and subagent, and shows each turn's model, cache use and savings in a pane inside Claude Code.",
   "author": {
     "name": "Deuce Labs",

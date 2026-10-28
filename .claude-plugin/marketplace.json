@@ -9,7 +9,7 @@
       "name": "aptic",
       "source": "./mods/aptic",
       "description": "Aptic picks the cheapest Claude model that can handle each turn, and shows what it saved in a pane inside Claude Code.",
-      "version": "0.7.1"
+      "version": "0.7.2"
     }
   ]
 }

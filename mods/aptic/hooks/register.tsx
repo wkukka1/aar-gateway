@@ -170,10 +170,10 @@ const chartSvg = (turns: TurnRow[]): string => {
   const slot = W / Math.max(turns.length, 1)
   const bw = Math.min(40, slot * 0.6)
   const bars = turns.map((t, i) => {
-    const h = Math.max(2, ((base - top) * t.requests) / max)
+    const barH = Math.max(2, ((base - top) * t.requests) / max)
     const cx = slot * i + slot / 2
-    return `<rect x="${(cx - bw / 2).toFixed(1)}" y="${(base - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="3" fill="${barColor(t)}"/>` +
-      `<text x="${cx.toFixed(1)}" y="${(base - h - 5).toFixed(1)}" text-anchor="middle" fill="${C.muted}">${t.requests}</text>` +
+    return `<rect x="${(cx - bw / 2).toFixed(1)}" y="${(base - barH).toFixed(1)}" width="${bw.toFixed(1)}" height="${barH.toFixed(1)}" rx="3" fill="${barColor(t)}"/>` +
+      `<text x="${cx.toFixed(1)}" y="${(base - barH - 5).toFixed(1)}" text-anchor="middle" fill="${C.muted}">${t.requests}</text>` +
       `<text x="${cx.toFixed(1)}" y="${base + 16}" text-anchor="middle" fill="${C.faint}">${t.time}</text>`
   }).join('')
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="${MONO}" font-size="10">` +
