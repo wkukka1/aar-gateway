@@ -16,6 +16,7 @@
     "cache",
     "savings"
   ],
+  "icon": "./logo.png",
   "types": "./types/index.d.ts",
   "userConfig": {
     "route": {
